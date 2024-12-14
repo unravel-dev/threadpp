@@ -334,7 +334,7 @@ void notify_for_exit(thread::id id)
 
 void notify(thread::id id)
 {
-    dispatch(id,
+    invoke(id,
            []()
            {
            });

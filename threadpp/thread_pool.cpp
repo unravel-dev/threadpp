@@ -202,7 +202,7 @@ private:
                 auto& workers = workers_[priority];
                 for(auto& w : workers)
                 {
-                    dispatch(w.get_id(),
+                    invoke(w.get_id(),
                            [this, priority]()
                            {
                                check_jobs(priority);

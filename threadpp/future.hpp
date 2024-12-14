@@ -665,7 +665,7 @@ inline void launch(thread::id id, std::launch policy, task& func)
     }
     else
     {
-        // dispatch(id, func);
+        //dispatch(id, func);
         if(this_thread::get_id() == id)
         {
             // directly call it
