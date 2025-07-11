@@ -157,7 +157,7 @@ public:
     /// Returns a future to the job.
     //-----------------------------------------------------------------------------
     template<typename F, typename... Args>
-    auto schedule(priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
+    auto schedule(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
 
     //-----------------------------------------------------------------------------
     /// Adds a job with default priority level.
@@ -165,6 +165,10 @@ public:
     //-----------------------------------------------------------------------------
     template<typename F, typename... Args>
     auto schedule(F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
+
+
+    template<typename F, typename... Args>
+    auto schedule(const std::string& name, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
 
     //-----------------------------------------------------------------------------
     /// Changes the priority level of the specified job.
@@ -201,9 +205,10 @@ public:
     /// Returns the number of jobs left.
     //-----------------------------------------------------------------------------
     auto get_jobs_count() const -> size_t;
+    auto get_jobs_count_detailed() const -> std::map<std::string, size_t>;
 
 private:
-    auto add_job(task& job, priority::group group) -> job_id;
+    auto add_job(task& job, priority::group group, const std::string& name) -> job_id;
 
     class impl;
     /// pimpl idiom
@@ -213,11 +218,11 @@ private:
 };
 
 template<typename F, typename... Args>
-auto thread_pool::schedule(priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+auto thread_pool::schedule(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
     auto packaged_task = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
     job_future<async_ret_type<F, Args...>> fut(std::move(packaged_task.callable_future));
-    fut.id = add_job(packaged_task.callable, group);
+    fut.id = add_job(packaged_task.callable, group, name);
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
     return fut;
@@ -226,7 +231,13 @@ auto thread_pool::schedule(priority::group group, F&& f, Args&&... args) -> job_
 template<typename F, typename... Args>
 auto thread_pool::schedule(F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return schedule(priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+    return schedule({}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+}
+
+template<typename F, typename... Args>
+auto thread_pool::schedule(const std::string& name, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+{
+    return schedule(name, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 } // namespace tpp

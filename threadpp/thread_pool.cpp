@@ -16,6 +16,7 @@ class thread_pool::impl
     {
         job_id id = 0;
         priority::group group;
+        std::string name;
     };
 
     struct job_info
@@ -78,7 +79,7 @@ public:
         workers.clear();
     }
 
-    auto add_job(task& user_job, priority::group group) -> job_id
+    auto add_job(task& user_job, priority::group group, const std::string& name) -> job_id
     {
         auto packaged_task = detail::package_future_task(std::move(user_job));
         std::lock_guard<std::mutex> lock(guard_);
@@ -86,6 +87,7 @@ public:
         auto& job = jobs_[id];
         job.handle.id = id;
         job.handle.group = group;
+        job.handle.name = name;
         job.callable = std::move(packaged_task.callable);
         job.callable_future = packaged_task.callable_future.share();
 
@@ -182,6 +184,17 @@ public:
     {
         std::lock_guard<std::mutex> lock(guard_);
         return jobs_.size();
+    }
+
+    auto get_jobs_count_detailed() const -> std::map<std::string, size_t>
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        std::map<std::string, size_t> result;
+        for(const auto& kvp : jobs_)
+        {
+            result[kvp.second.handle.name]++;
+        }
+        return result;
     }
 
 private:
@@ -298,9 +311,9 @@ thread_pool::thread_pool(const std::map<priority::category, size_t>& workers_per
 
 thread_pool::~thread_pool() = default;
 
-job_id thread_pool::add_job(task& job, priority::group group)
+job_id thread_pool::add_job(task& job, priority::group group, const std::string& name)
 {
-    return impl_->add_job(job, group);
+    return impl_->add_job(job, group, name);
 }
 
 void thread_pool::change_priority(job_id id, priority::group group)
@@ -331,6 +344,11 @@ void thread_pool::wait_all()
 size_t thread_pool::get_jobs_count() const
 {
     return impl_->get_jobs_count();
+}
+
+std::map<std::string, size_t> thread_pool::get_jobs_count_detailed() const
+{
+    return impl_->get_jobs_count_detailed();
 }
 
 void job_future_storage::change_priority(priority::group group)
