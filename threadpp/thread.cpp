@@ -272,7 +272,17 @@ auto get_pending_task_count_detailed(thread::id id) -> task_info
     const auto total = processing + left_to_process + pending;
 
     task_info info;
-    info.count = total;
+    info.left_to_process = left_to_process;
+    info.processing = processing;
+    info.pending = pending;
+    info.total = total;
+
+    if(info.total > 200)
+    {
+        int a = 0;
+        a++;
+    }
+
     if(!context->name.empty())
     {
         info.thread_name = context->name;
@@ -286,7 +296,7 @@ auto get_pending_task_count_detailed(thread::id id) -> task_info
 
 auto get_pending_task_count(thread::id id) -> size_t
 {
-    return get_pending_task_count_detailed(id).count;
+    return get_pending_task_count_detailed(id).total;
 }
 
 auto has_tasks_to_process(const thread_context& context) -> bool

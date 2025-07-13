@@ -3,7 +3,7 @@
 #include "future.hpp"
 #include <map>
 #include <memory>
-
+#include <string>
 namespace tpp
 {
 
@@ -159,6 +159,9 @@ public:
     template<typename F, typename... Args>
     auto schedule(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
 
+    template<typename F, typename... Args>
+    auto schedule(priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
+
     //-----------------------------------------------------------------------------
     /// Adds a job with default priority level.
     /// Returns a future to the job.
@@ -226,6 +229,11 @@ auto thread_pool::schedule(const std::string& name, priority::group group, F&& f
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
     return fut;
+}
+template<typename F, typename... Args>
+auto thread_pool::schedule(priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+{
+    return schedule({}, group, std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template<typename F, typename... Args>

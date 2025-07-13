@@ -161,7 +161,11 @@ auto get_all_registered_threads() -> std::vector<thread::id>;
 //-----------------------------------------------------------------------------
 struct task_info
 {
-    size_t count{};
+    size_t left_to_process{};
+    size_t processing{};
+    size_t pending{};
+    size_t total{};
+
     std::string thread_name{};
 };
 auto get_pending_task_count_detailed(thread::id id) -> task_info;
