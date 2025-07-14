@@ -277,12 +277,6 @@ auto get_pending_task_count_detailed(thread::id id) -> task_info
     info.pending = pending;
     info.total = total;
 
-    if(info.total > 200)
-    {
-        int a = 0;
-        a++;
-    }
-
     if(!context->name.empty())
     {
         info.thread_name = context->name;
