@@ -1,7 +1,7 @@
 # threadpp - thread communication
 ![windows](https://github.com/unravel-dev/threadpp/actions/workflows/windows.yml/badge.svg)
 ![linux](https://github.com/unravel-dev/threadpp/actions/workflows/linux.yml/badge.svg)
-![macos](https://github.com/unravel-deva/threadpp/actions/workflows/macos.yml/badge.svg)
+![macos](https://github.com/unravel-dev/threadpp/actions/workflows/macos.yml/badge.svg)
 
 C++14 library providing easy interface for thread communication in a single process.
 It has no dependencies except the standard library.
