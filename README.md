@@ -1,9 +1,9 @@
-# threadpp - thread communication library
-![windows](https://github.com/volcoma/threadpp/actions/workflows/windows.yml/badge.svg)
-![linux](https://github.com/volcoma/threadpp/actions/workflows/linux.yml/badge.svg)
-![macos](https://github.com/volcoma/threadpp/actions/workflows/macos.yml/badge.svg)
+# threadpp - thread communication
+![windows](https://github.com/unravel-dev/threadpp/actions/workflows/windows.yml/badge.svg)
+![linux](https://github.com/unravel-dev/threadpp/actions/workflows/linux.yml/badge.svg)
+![macos](https://github.com/unravel-deva/threadpp/actions/workflows/macos.yml/badge.svg)
 
-C++14 library providing easy interface for inter-thread communication in a single process.
+C++14 library providing easy interface for thread communication in a single process.
 It has no dependencies except the standard library.
 
 The whole idea behind it is that all the blocking calls like future::wait or this_thread::sleep_for
