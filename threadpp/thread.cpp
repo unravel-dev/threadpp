@@ -582,12 +582,20 @@ void wait()
 
 void register_this_thread()
 {
+    if(has_local_context())
+    {
+        return;
+    }
     auto context = register_thread_impl(std::this_thread::get_id(), {});
     set_local_context(context.get());
 }
 
 void register_this_thread(const std::string& name)
 {
+    if(has_local_context())
+    {
+        return;
+    }
     auto context = register_thread_impl(std::this_thread::get_id(), name);
     set_local_context(context.get());
 }
