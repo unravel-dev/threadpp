@@ -52,7 +52,7 @@ public:
                 workers_for_level.reserve(count);
                 for(size_t i = 0; i < count; ++i)
                 {
-                    std::string name = "pool_w:" + std::to_string(unsigned(level)) + ":" + std::to_string(i);
+                    std::string name = "pool worker:" + std::to_string(unsigned(level)) + ":" + std::to_string(i);
                     workers_for_level.emplace_back(make_thread(name));
                     auto& task = workers_for_level.back();
                     tpp::set_thread_config(task.get_id(), config);
@@ -180,6 +180,47 @@ public:
         }
     }
 
+    void wait_all(priority::category category, const on_progress_callback& on_progress)
+    {
+        
+        struct job_info_wrapper
+        {
+            job_handle handle;
+            shared_future<void> future;
+        };
+
+        std::vector<job_info_wrapper> futures;
+        {
+            std::lock_guard<std::mutex> lock(guard_);
+            futures.reserve(jobs_.size());
+            for(const auto& kvp : jobs_)
+            {
+                auto& job = kvp.second;
+                if(job.handle.group.level >= category)
+                {
+                    job_info_wrapper wrapper;
+                    wrapper.handle = job.handle;
+                    wrapper.future = job.callable_future;
+                    futures.emplace_back(std::move(wrapper));
+                }
+            }
+        }
+        size_t current_job = 0;
+        for(const auto& wrapper : futures)
+        {
+            wrapper.future.wait();
+            current_job++;
+            if(on_progress)
+            {
+                progress_info info;
+                info.name = wrapper.handle.name;
+                info.current_job = current_job;
+                info.total_jobs = futures.size();
+                on_progress(info);
+            }
+        }
+    }
+
     auto get_jobs_count() const -> size_t
     {
         std::lock_guard<std::mutex> lock(guard_);
@@ -233,7 +274,7 @@ private:
         {
             auto queue_priority_level = kvp.first;
 
-            if(level <= queue_priority_level)
+            if(selected_level <= queue_priority_level)
             {
                 auto& job_queue = kvp.second;
 
@@ -300,7 +341,7 @@ private:
 };
 
 ////////////////////////////////////////////////////////////
-thread_pool::thread_pool() : thread_pool({{priority::category::normal, thread::hardware_concurrency()}})
+thread_pool::thread_pool() : thread_pool({{priority::category::low, thread::hardware_concurrency()}})
 {
 }
 thread_pool::thread_pool(const std::map<priority::category, size_t>& workers_per_priority_level,
@@ -339,6 +380,11 @@ void thread_pool::stop(job_id id)
 void thread_pool::wait_all()
 {
     impl_->wait_all();
+}
+
+void thread_pool::wait_all(priority::category category, const on_progress_callback& on_progress)
+{
+    impl_->wait_all(category, on_progress);
 }
 
 size_t thread_pool::get_jobs_count() const

@@ -12,6 +12,7 @@ namespace priority
 
 enum class category : size_t
 {
+    low,
     normal,
     high,
     critical
@@ -33,6 +34,10 @@ inline auto operator==(const group& lhs, const group& rhs) -> bool
     return lhs.level == rhs.level && lhs.priority == rhs.priority;
 }
 
+inline auto low(size_t priority = 0) -> group
+{
+    return {category::low, priority};
+}
 inline auto normal(size_t priority = 0) -> group
 {
     return {category::normal, priority};
@@ -203,6 +208,14 @@ public:
     /// Blocks until all active jobs are ready.
     //-----------------------------------------------------------------------------
     void wait_all();
+    struct progress_info
+    {
+        std::string name{};
+        size_t current_job{};
+        size_t total_jobs{};
+    };
+    using on_progress_callback = std::function<void(const progress_info& info)>;
+    void wait_all(priority::category category, const on_progress_callback& on_progress = nullptr);
 
     //-----------------------------------------------------------------------------
     /// Returns the number of jobs left.
