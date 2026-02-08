@@ -24,6 +24,7 @@ struct thread_context
     std::atomic<std::uint32_t> processing_stack_depth{0};
 
     std::string name;
+    bool external{false};
     std::atomic<bool> wakeup{false};
     std::atomic<bool> exit{false};
 };
@@ -38,6 +39,20 @@ struct program_context
     thread::id main_thread_id{invalid_id()};
     std::atomic<size_t> init_count{0};
     init_data config;
+
+    auto get_remaining_owned_threads() -> int
+    {
+        int remaining = 0;
+        for(const auto& context : contexts)
+        {
+            if(!context.second->external)
+            {
+                remaining++;
+            }
+        }
+        return remaining;
+    }
+    
 };
 
 #define log_info_func(msg)  log_info("[tpp::" + std::string(__func__) + "] : " + (msg))
@@ -101,7 +116,7 @@ void log_error(const std::string& name)
     }
 }
 
-auto register_thread_impl(std::thread::id native_thread_id, const std::string& name) -> std::shared_ptr<thread_context>
+auto register_thread_impl(std::thread::id native_thread_id, const std::string& name, bool external = false) -> std::shared_ptr<thread_context>
 {
     auto& global_context = get_global_context();
     std::unique_lock<std::mutex> lock(global_context.mutex);
@@ -131,7 +146,7 @@ auto register_thread_impl(std::thread::id native_thread_id, const std::string& n
     local_context->native_thread_id = native_thread_id;
     local_context->id = id;
     local_context->capacity_shrink_threashold = global_context.config.tasks_capacity.capacity_shrink_threashold;
-
+    local_context->external = external;
     local_context->name = name;
     global_context.id_map[native_thread_id] = id;
     global_context.contexts.emplace(id, local_context);
@@ -161,9 +176,11 @@ void unregister_thread_impl(thread::id id)
     // from the global container and the local variable
     // will be the last reference to it
     global_context.contexts.erase(id);
+
+    size_t remaining_owned_threads = global_context.get_remaining_owned_threads();
     // if this was the last entry then
     // notify that everything is cleaned up
-    if(global_context.contexts.empty())
+    if(remaining_owned_threads == 0)
     {
         global_context.cleanup_event.notify_all();
     }
@@ -210,7 +227,7 @@ auto shutdown(const std::chrono::seconds& timeout) -> int
     // guard for spurious wakeups
     auto predicate = [&]() -> bool
     {
-        return global_context.contexts.empty();
+        return global_context.get_remaining_owned_threads() == 0;
     };
 
     auto result = global_context.cleanup_event.wait_for(lock, timeout, predicate);
@@ -223,9 +240,23 @@ auto shutdown(const std::chrono::seconds& timeout) -> int
     }
     else
     {
-        log_info_func("Timed out. Not all registered threads exited.");
+        size_t remaining_owned_threads = global_context.get_remaining_owned_threads();
+        log_info_func("Timed out. Not all registered threads exited. Internal Threads remaining: " + std::to_string(remaining_owned_threads));
+        for(const auto& p : global_context.contexts)
+        {
+            std::string thread_name = std::to_string(p.first);
+            if(!p.second->name.empty())
+            {
+                thread_name += " - " + p.second->name;
+            }
+            if(p.second->external)
+            {
+                thread_name += " (External)";
+            }
+            log_info_func("Thread: " + thread_name + " still running.");
+        }
         global_context.config = {};
-        return static_cast<int>(global_context.contexts.size());
+        return remaining_owned_threads;
     }
 }
 
@@ -586,17 +617,17 @@ void register_this_thread()
     {
         return;
     }
-    auto context = register_thread_impl(std::this_thread::get_id(), {});
+    auto context = register_thread_impl(std::this_thread::get_id(), {}, false);
     set_local_context(context.get());
 }
 
-void register_this_thread(const std::string& name)
+void register_this_thread(const std::string& name, bool external)
 {
     if(has_local_context())
     {
         return;
     }
-    auto context = register_thread_impl(std::this_thread::get_id(), name);
+    auto context = register_thread_impl(std::this_thread::get_id(), name, external);
     set_local_context(context.get());
 }
 

@@ -190,7 +190,7 @@ namespace this_thread
 /// Registers this thread and links it for fast access.
 //-----------------------------------------------------------------------------
 void register_this_thread();
-void register_this_thread(const std::string& name);
+void register_this_thread(const std::string& name, bool external = false);
 
 //-----------------------------------------------------------------------------
 /// Unregisters this thread and unlinks it.
