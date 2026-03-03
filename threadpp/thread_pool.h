@@ -216,12 +216,14 @@ public:
     };
     using on_progress_callback = std::function<void(const progress_info& info)>;
     void wait_all(priority::category category, const on_progress_callback& on_progress = nullptr);
+    void wait_all_polling(priority::category category, const on_progress_callback& on_progress = nullptr);
 
     //-----------------------------------------------------------------------------
     /// Returns the number of jobs left.
     //-----------------------------------------------------------------------------
     auto get_jobs_count() const -> size_t;
     auto get_jobs_count_detailed() const -> std::map<std::string, size_t>;
+    auto get_jobs_count(priority::category category) const -> size_t;
 
 private:
     auto add_job(task& job, priority::group group, const std::string& name) -> job_id;

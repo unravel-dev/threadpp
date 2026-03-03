@@ -221,10 +221,69 @@ public:
         }
     }
 
+    void wait_all_polling(priority::category category, const on_progress_callback& on_progress)
+    {
+        
+        struct job_info_wrapper
+        {
+            job_handle handle;
+            shared_future<void> future;
+        };
+
+        std::vector<job_info_wrapper> futures;
+        {
+            std::lock_guard<std::mutex> lock(guard_);
+            futures.reserve(jobs_.size());
+            for(const auto& kvp : jobs_)
+            {
+                auto& job = kvp.second;
+                if(job.handle.group.level >= category)
+                {
+                    job_info_wrapper wrapper;
+                    wrapper.handle = job.handle;
+                    wrapper.future = job.callable_future;
+                    futures.emplace_back(std::move(wrapper));
+                }
+            }
+        }
+        size_t current_job = 0;
+        for(const auto& wrapper : futures)
+        {
+            while(!wrapper.future.is_ready())
+            {
+                wrapper.future.wait_for(std::chrono::milliseconds(16));
+                if(on_progress)
+                {
+                    progress_info info;
+                    info.name = wrapper.handle.name;
+                    info.current_job = current_job;
+                    info.total_jobs = futures.size();
+                    on_progress(info);
+                }
+            }
+
+            current_job++;
+        }
+    }
+
+
     auto get_jobs_count() const -> size_t
     {
         std::lock_guard<std::mutex> lock(guard_);
         return jobs_.size();
+    }
+    auto get_jobs_count(priority::category category) const -> size_t
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        size_t count = 0;
+        for(const auto& kvp : jobs_)
+        {
+            if(kvp.second.handle.group.level >= category)
+            {
+                count++;
+            }
+        }
+        return count;
     }
 
     auto get_jobs_count_detailed() const -> std::map<std::string, size_t>
@@ -387,9 +446,19 @@ void thread_pool::wait_all(priority::category category, const on_progress_callba
     impl_->wait_all(category, on_progress);
 }
 
+void thread_pool::wait_all_polling(priority::category category, const on_progress_callback& on_progress)
+{
+    impl_->wait_all_polling(category, on_progress);
+}
+
 size_t thread_pool::get_jobs_count() const
 {
     return impl_->get_jobs_count();
+}
+
+size_t thread_pool::get_jobs_count(priority::category category) const
+{
+    return impl_->get_jobs_count(category);
 }
 
 std::map<std::string, size_t> thread_pool::get_jobs_count_detailed() const
