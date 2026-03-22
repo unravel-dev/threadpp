@@ -79,20 +79,41 @@ public:
         workers.clear();
     }
 
-    auto add_job(task& user_job, priority::group group, const std::string& name) -> job_id
+    auto add_job(task& user_job, priority::group group, const std::string& name, bool queue = true) -> job_id
     {
         auto packaged_task = detail::package_future_task(std::move(user_job));
         std::lock_guard<std::mutex> lock(guard_);
         auto id = free_id_++;
-        auto& job = jobs_[id];
+
+        auto& target = queue ? jobs_ : deferred_jobs_;
+        auto& job = target[id];
         job.handle.id = id;
         job.handle.group = group;
         job.handle.name = name;
         job.callable = std::move(packaged_task.callable);
         job.callable_future = packaged_task.callable_future.share();
 
-        add_job_handle(job.handle);
+        if(queue)
+        {
+            add_job_handle(job.handle);
+        }
         return id;
+    }
+
+    auto submit(job_id id) -> bool
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        auto it = deferred_jobs_.find(id);
+        if(it == deferred_jobs_.end())
+        {
+            return false;
+        }
+
+        auto& job = jobs_[id];
+        job = std::move(it->second);
+        deferred_jobs_.erase(it);
+        add_job_handle(job.handle);
+        return true;
     }
 
     void change_priority(job_id id, priority::group group)
@@ -100,21 +121,23 @@ public:
         std::lock_guard<std::mutex> lock(guard_);
 
         auto it = jobs_.find(id);
-        if(it == jobs_.end())
+        if(it != jobs_.end())
         {
+            job_info& job = it->second;
+            if(!job.callable || job.handle.group == group)
+            {
+                return;
+            }
+            job.handle.group = group;
+            add_job_handle(job.handle);
             return;
         }
 
-        job_info& job = it->second;
-
-        if(!job.callable || job.handle.group == group)
+        auto dit = deferred_jobs_.find(id);
+        if(dit != deferred_jobs_.end())
         {
-            return;
+            dit->second.handle.group = group;
         }
-
-        job.handle.group = group;
-
-        add_job_handle(job.handle);
     }
 
     void clear(job_id id, bool check_callable)
@@ -123,16 +146,19 @@ public:
         auto it = jobs_.find(id);
         if(it != jobs_.end())
         {
-            if(check_callable)
+            if(!check_callable || it->second.callable)
             {
-                if(it->second.callable)
-                {
-                    jobs_.erase(id);
-                }
+                jobs_.erase(it);
             }
-            else
+            return;
+        }
+
+        auto dit = deferred_jobs_.find(id);
+        if(dit != deferred_jobs_.end())
+        {
+            if(!check_callable || dit->second.callable)
             {
-                jobs_.erase(id);
+                deferred_jobs_.erase(dit);
             }
         }
     }
@@ -141,6 +167,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(guard_);
         jobs_.clear();
+        deferred_jobs_.clear();
         job_priority_queues_.clear();
     }
 
@@ -396,6 +423,7 @@ private:
     job_id free_id_ = 1;
     priority_workers workers_;
     std::unordered_map<job_id, job_info> jobs_;
+    std::unordered_map<job_id, job_info> deferred_jobs_;
     priority_queues job_priority_queues_;
 };
 
@@ -411,9 +439,14 @@ thread_pool::thread_pool(const std::map<priority::category, size_t>& workers_per
 
 thread_pool::~thread_pool() = default;
 
-job_id thread_pool::add_job(task& job, priority::group group, const std::string& name)
+job_id thread_pool::add_job(task& job, priority::group group, const std::string& name, bool queue)
 {
-    return impl_->add_job(job, group, name);
+    return impl_->add_job(job, group, name, queue);
+}
+
+auto thread_pool::submit(job_id id) -> bool
+{
+    return impl_->submit(id);
 }
 
 void thread_pool::change_priority(job_id id, priority::group group)
@@ -489,6 +522,24 @@ void job_future_storage::stop()
     if(owner_)
     {
         owner_->stop(id);
+    }
+}
+
+void job_future_storage::submit() const
+{
+    if(submitted_)
+    {
+        return;
+    }
+
+    if(sentinel_.expired())
+    {
+        return;
+    }
+
+    if(owner_)
+    {
+        submitted_ = owner_->submit(id);
     }
 }
 
