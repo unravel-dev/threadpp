@@ -57,6 +57,7 @@ public:
                     auto& task = workers_for_level.back();
                     tpp::set_thread_config(task.get_id(), config);
                 }
+                pending_wake_[level] = false;
             }
         }
     }
@@ -82,62 +83,72 @@ public:
     auto add_job(task& user_job, priority::group group, const std::string& name, bool queue = true) -> job_id
     {
         auto packaged_task = detail::package_future_task(std::move(user_job));
-        std::lock_guard<std::mutex> lock(guard_);
-        auto id = free_id_++;
-
-        auto& target = queue ? jobs_ : deferred_jobs_;
-        auto& job = target[id];
-        job.handle.id = id;
-        job.handle.group = group;
-        job.handle.name = name;
-        job.callable = std::move(packaged_task.callable);
-        job.callable_future = packaged_task.callable_future.share();
-
-        if(queue)
+        std::vector<worker_wakeup> wakeups;
+        job_id id = 0;
         {
-            add_job_handle(job.handle);
+            std::lock_guard<std::mutex> lock(guard_);
+            id = free_id_++;
+            auto& target = queue ? jobs_ : deferred_jobs_;
+            auto& job = target[id];
+            job.handle.id = id;
+            job.handle.group = group;
+            job.handle.name = name;
+            job.callable = std::move(packaged_task.callable);
+            job.callable_future = packaged_task.callable_future.share();
+            if(queue)
+            {
+                queue_job_handle(job.handle, wakeups);
+            }
         }
+        dispatch_wakeups(wakeups);
         return id;
     }
 
     auto submit(job_id id) -> bool
     {
-        std::lock_guard<std::mutex> lock(guard_);
-        auto it = deferred_jobs_.find(id);
-        if(it == deferred_jobs_.end())
+        std::vector<worker_wakeup> wakeups;
         {
-            return false;
+            std::lock_guard<std::mutex> lock(guard_);
+            auto it = deferred_jobs_.find(id);
+            if(it == deferred_jobs_.end())
+            {
+                return false;
+            }
+            auto& job = jobs_[id];
+            job = std::move(it->second);
+            deferred_jobs_.erase(it);
+            queue_job_handle(job.handle, wakeups);
         }
-
-        auto& job = jobs_[id];
-        job = std::move(it->second);
-        deferred_jobs_.erase(it);
-        add_job_handle(job.handle);
+        dispatch_wakeups(wakeups);
         return true;
     }
 
     void change_priority(job_id id, priority::group group)
     {
-        std::lock_guard<std::mutex> lock(guard_);
-
-        auto it = jobs_.find(id);
-        if(it != jobs_.end())
+        std::vector<worker_wakeup> wakeups;
         {
-            job_info& job = it->second;
-            if(!job.callable || job.handle.group == group)
+            std::lock_guard<std::mutex> lock(guard_);
+            auto it = jobs_.find(id);
+            if(it != jobs_.end())
             {
-                return;
+                job_info& job = it->second;
+                if(!job.callable || job.handle.group == group)
+                {
+                    return;
+                }
+                job.handle.group = group;
+                queue_job_handle(job.handle, wakeups);
             }
-            job.handle.group = group;
-            add_job_handle(job.handle);
-            return;
+            else
+            {
+                auto dit = deferred_jobs_.find(id);
+                if(dit != deferred_jobs_.end())
+                {
+                    dit->second.handle.group = group;
+                }
+            }
         }
-
-        auto dit = deferred_jobs_.find(id);
-        if(dit != deferred_jobs_.end())
-        {
-            dit->second.handle.group = group;
-        }
+        dispatch_wakeups(wakeups);
     }
 
     void clear(job_id id, bool check_callable)
@@ -169,6 +180,10 @@ public:
         jobs_.clear();
         deferred_jobs_.clear();
         job_priority_queues_.clear();
+        for(auto& kvp : pending_wake_)
+        {
+            kvp.second = false;
+        }
     }
 
     void wait(job_id id)
@@ -325,96 +340,125 @@ public:
     }
 
 private:
-    void add_job_handle(job_handle handle)
+    struct worker_wakeup
+    {
+        thread::id id{};
+        priority::category level{};
+    };
+
+    enum class take_result
+    {
+        empty,
+        skip,
+        taken
+    };
+
+    void queue_job_handle(const job_handle& handle, std::vector<worker_wakeup>& wakeups)
     {
         job_priority_queues_[handle.group.level].emplace(handle);
-        notify_workers(handle.group.level);
+        collect_wakeups(handle.group.level, wakeups);
     }
 
-    void notify_workers(priority::category max_priority)
+    void collect_wakeups(priority::category job_level, std::vector<worker_wakeup>& wakeups)
     {
         for(const auto& kvp : workers_)
         {
-            auto priority = kvp.first;
-
-            if(priority <= max_priority)
+            const auto worker_level = kvp.first;
+            if(worker_level > job_level)
             {
-                auto& workers = workers_[priority];
-                for(auto& w : workers)
-                {
-                    invoke(w.get_id(),
-                           [this, priority]()
-                           {
-                               check_jobs(priority);
-                           });
-                }
+                continue;
             }
+            auto& pending = pending_wake_[worker_level];
+            if(pending)
+            {
+                continue;
+            }
+            pending = true;
+            for(const auto& worker : kvp.second)
+            {
+                wakeups.push_back({worker.get_id(), worker_level});
+            }
+        }
+    }
+
+    void dispatch_wakeups(const std::vector<worker_wakeup>& wakeups)
+    {
+        for(const auto& wakeup : wakeups)
+        {
+            invoke(wakeup.id,
+                   [this, level = wakeup.level]()
+                   {
+                       check_jobs(level);
+                   });
         }
     }
 
     auto get_highest_priority_queue_above(priority::category level) -> jobs_queue&
     {
         priority::category selected_level = level;
-
         for(const auto& kvp : job_priority_queues_)
         {
-            auto queue_priority_level = kvp.first;
-
-            if(selected_level <= queue_priority_level)
+            const auto queue_priority_level = kvp.first;
+            if(selected_level <= queue_priority_level && !kvp.second.empty())
             {
-                auto& job_queue = kvp.second;
-
-                if(!job_queue.empty())
-                {
-                    selected_level = queue_priority_level;
-                }
+                selected_level = queue_priority_level;
             }
         }
         return job_priority_queues_[selected_level];
     }
 
+    auto try_take_job(priority::category level, task& user_job, job_id& id) -> take_result
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        auto& job_queue = get_highest_priority_queue_above(level);
+        if(job_queue.empty())
+        {
+            pending_wake_[level] = false;
+            return take_result::empty;
+        }
+        const auto handle = job_queue.top();
+        job_queue.pop();
+        auto it = jobs_.find(handle.id);
+        if(it == jobs_.end())
+        {
+            return take_result::skip;
+        }
+        auto& job = it->second;
+        // change_priority leaves a stale handle in the old queue. The first
+        // take moves callable; later handles still find the job but have nothing to run.
+        if(level <= job.handle.group.level && job.callable)
+        {
+            id = job.handle.id;
+            user_job = std::move(job.callable);
+            return take_result::taken;
+        }
+        return take_result::skip;
+    }
+
     void check_jobs(priority::category level)
     {
-        if(this_thread::notified_for_exit())
+        for(;;)
         {
-            return;
-        }
-
-        task user_job;
-        job_id id = 0;
-
-        {
-            std::lock_guard<std::mutex> lock(guard_);
-            auto& job_queue = get_highest_priority_queue_above(level);
-
-            if(job_queue.empty())
+            if(this_thread::notified_for_exit())
             {
                 return;
             }
-            const auto& handle = job_queue.top();
-            auto it = jobs_.find(handle.id);
-            if(it == jobs_.end())
+            task user_job;
+            job_id id = 0;
+            const auto result = try_take_job(level, user_job, id);
+            if(result == take_result::empty)
             {
-                job_queue.pop();
                 return;
             }
-            auto& job = it->second;
-
-            // if priority level is lower still matches
-            if(level <= job.handle.group.level)
+            if(result == take_result::skip || !user_job)
             {
-                id = job.handle.id;
-                user_job = std::move(job.callable);
+                continue;
             }
 
-            job_queue.pop();
-        }
-        ////////////
-        if(user_job)
-        {
-            user_job();
-            // clear after the call so that the task
-            // is waitable via the pool.
+            if(user_job)
+            {
+                user_job();
+            }
             clear(id, false);
         }
     }
@@ -422,6 +466,7 @@ private:
     mutable std::mutex guard_;
     job_id free_id_ = 1;
     priority_workers workers_;
+    std::map<priority::category, bool> pending_wake_;
     std::unordered_map<job_id, job_info> jobs_;
     std::unordered_map<job_id, job_info> deferred_jobs_;
     priority_queues job_priority_queues_;
