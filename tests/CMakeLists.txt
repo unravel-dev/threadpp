@@ -12,7 +12,7 @@ find_package(Threads REQUIRED)
 target_link_libraries(${target_name} PUBLIC Threads::Threads)
 
 
-target_link_libraries(${target_name} PUBLIC threadpp)
+target_link_libraries(${target_name} PUBLIC threadpp suitepp)
 
 set_target_properties(${target_name} PROPERTIES
     CXX_STANDARD 17

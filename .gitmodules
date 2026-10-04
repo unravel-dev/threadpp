@@ -1,3 +1,6 @@
 [submodule "cmake"]
 	path = cmake
 	url = https://github.com/unravel-dev/cmake.git
+[submodule "3rdparty/suitepp"]
+	path = 3rdparty/suitepp
+	url = https://github.com/unravel-dev/suitepp.git

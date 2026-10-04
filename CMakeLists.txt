@@ -38,5 +38,6 @@ endif()
 add_subdirectory(threadpp)
 
 if(BUILD_THREADPP_TESTS)
+	add_subdirectory(3rdparty)
 	add_subdirectory(tests)
 endif()

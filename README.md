@@ -8,6 +8,13 @@ It has no dependencies except the standard library.
 
 The whole idea behind it is that all the blocking calls like future::wait or this_thread::sleep_for
 can actually process different tasks if someone invokes into that thread while it is waiting on something.
+Tasks posted with invoke_on_process, dispatch_on_process, async_on_process or then_on_process are the
+exception: only the target thread's own this_thread::process() / process_for(), called from the top of its
+stack, runs them - never a blocking call, and never a process() called from inside a task. Use them for work
+that must not run in the middle of whatever the thread is doing when it blocks, such as changing state that
+the code around the blocking call holds references into. Tasks posted while a batch of them runs wait for the
+next process() call. A thread loop built on this_thread::process_and_wait() runs them between waits, as threads
+made with make_thread do; a loop on this_thread::wait() never does.
 It provides abstractions like condition_variable, promise, future, shared_future, future continuations, async
 which are standard conforming. 
 It provides a very easy interface to attach any std thread to it and start invoking into it.

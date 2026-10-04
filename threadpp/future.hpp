@@ -54,6 +54,16 @@ template<typename F, typename... Args>
 auto async(F&& f, Args&&... args) -> future<async_ret_type<F, Args...>>;
 
 //-----------------------------------------------------------------------------
+/// async on the target thread's on-process tasks (invoke_on_process): the
+/// task runs from that thread's process() call, never from its blocking
+/// calls. Runs directly when the calling thread is the target and is itself
+/// running an on-process task. A thread that waits on the returned future
+/// while the task sits in its own on-process queue waits forever.
+//-----------------------------------------------------------------------------
+template<typename F, typename... Args>
+auto async_on_process(thread::id id, F&& f, Args&&... args) -> future<async_ret_type<F, Args...>>;
+
+//-----------------------------------------------------------------------------
 /// produces a future that is ready immediately
 /// and holds the given value
 //-----------------------------------------------------------------------------
@@ -339,6 +349,19 @@ public:
     auto then(thread::id id, F&& f) -> future<then_ret_type<F, future<T>>>;
     template<typename F>
     auto then(F&& f) -> future<then_ret_type<F, future<T>>>;
+
+    //-----------------------------------------------------------------------------
+    /// Attach the continuation func to *this, to run as an on-process task of
+    /// thread id (async_on_process). After this function returns, valid() is
+    /// false.
+    //-----------------------------------------------------------------------------
+    template<typename F>
+    auto then_on_process(thread::id id, F&& f) -> future<then_ret_type<F, future<T>>>;
+
+private:
+    // the continuation's task goes to launch(task) once *this is ready
+    template<typename F, typename Launch>
+    auto then_launched(Launch launch, F&& f) -> future<then_ret_type<F, future<T>>>;
 };
 
 template<>
@@ -402,6 +425,19 @@ public:
     auto then(thread::id id, F&& f) -> future<then_ret_type<F, future<void>>>;
     template<typename F>
     auto then(F&& f) -> future<then_ret_type<F, future<void>>>;
+
+    //-----------------------------------------------------------------------------
+    /// Attach the continuation func to *this, to run as an on-process task of
+    /// thread id (async_on_process). After this function returns, valid() is
+    /// false.
+    //-----------------------------------------------------------------------------
+    template<typename F>
+    auto then_on_process(thread::id id, F&& f) -> future<then_ret_type<F, future<void>>>;
+
+private:
+    // the continuation's task goes to launch(task) once *this is ready
+    template<typename F, typename Launch>
+    auto then_launched(Launch launch, F&& f) -> future<then_ret_type<F, future<void>>>;
 };
 
 //-----------------------------------------------------------------------------
@@ -469,6 +505,18 @@ public:
     auto then(thread::id id, F&& f) const -> future<then_ret_type<F, shared_future<T>>>;
     template<typename F>
     auto then(F&& f) const -> future<then_ret_type<F, shared_future<T>>>;
+
+    //-----------------------------------------------------------------------------
+    /// Attach the continuation func to *this, to run as an on-process task of
+    /// thread id (async_on_process).
+    //-----------------------------------------------------------------------------
+    template<typename F>
+    auto then_on_process(thread::id id, F&& f) const -> future<then_ret_type<F, shared_future<T>>>;
+
+private:
+    // the continuation's task goes to launch(task) once *this is ready
+    template<typename F, typename Launch>
+    auto then_launched(Launch launch, F&& f) const -> future<then_ret_type<F, shared_future<T>>>;
 };
 
 //-----------------------------------------------------------------------------
@@ -535,6 +583,18 @@ public:
     auto then(thread::id id, F&& f) const -> future<then_ret_type<F, shared_future<void>>>;
     template<typename F>
     auto then(F&& f) const -> future<then_ret_type<F, shared_future<void>>>;
+
+    //-----------------------------------------------------------------------------
+    /// Attach the continuation func to *this, to run as an on-process task of
+    /// thread id (async_on_process).
+    //-----------------------------------------------------------------------------
+    template<typename F>
+    auto then_on_process(thread::id id, F&& f) const -> future<then_ret_type<F, shared_future<void>>>;
+
+private:
+    // the continuation's task goes to launch(task) once *this is ready
+    template<typename F, typename Launch>
+    auto then_launched(Launch launch, F&& f) const -> future<then_ret_type<F, shared_future<void>>>;
 };
 
 //-----------------------------------------------------------------------------
@@ -677,6 +737,23 @@ inline void launch(thread::id id, std::launch policy, task& func)
         }
     }
 }
+
+inline void launch_on_process(thread::id id, task& func)
+{
+    if(id == caller_id())
+    {
+        id = this_thread::get_id();
+    }
+    if(is_on_process_point(id))
+    {
+        // directly call it
+        func();
+    }
+    else
+    {
+        invoke_packaged_task_on_process(id, func);
+    }
+}
 } // namespace detail
 
 template<typename F, typename... Args>
@@ -716,12 +793,24 @@ auto async(F&& f, Args&&... args) -> future<async_ret_type<F, Args...>>
 {
     return tpp::async(std::launch::deferred | std::launch::async, std::forward<F>(f), std::forward<Args>(args)...);
 }
+
+template<typename F, typename... Args>
+auto async_on_process(thread::id id, F&& f, Args&&... args) -> future<async_ret_type<F, Args...>>
+{
+    auto package = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
+    auto& future = package.callable_future;
+    auto& task = package.callable;
+
+    detail::launch_on_process(id, task);
+
+    return std::move(future);
+}
 //-----------------------------------------------------------------------------
 /// future<T>::then() overloads
 //-----------------------------------------------------------------------------
 template<typename T>
-template<typename F>
-auto future<T>::then(thread::id id, std::launch policy, F&& f) -> future<then_ret_type<F, future<T>>>
+template<typename F, typename Launch>
+auto future<T>::then_launched(Launch launch, F&& f) -> future<then_ret_type<F, future<T>>>
 {
     detail::check_state(this->state_);
 
@@ -737,12 +826,36 @@ auto future<T>::then(thread::id id, std::launch policy, F&& f) -> future<then_re
     auto& task = package.callable;
 
     state->set_continuation(
-        [id, policy, task = std::move(task)]() mutable
+        [launch, task = std::move(task)]() mutable
         {
-            detail::launch(id, policy, task);
+            launch(task);
         });
 
     return std::move(future);
+}
+
+template<typename T>
+template<typename F>
+auto future<T>::then(thread::id id, std::launch policy, F&& f) -> future<then_ret_type<F, future<T>>>
+{
+    return then_launched(
+        [id, policy](task& work)
+        {
+            detail::launch(id, policy, work);
+        },
+        std::forward<F>(f));
+}
+
+template<typename T>
+template<typename F>
+auto future<T>::then_on_process(thread::id id, F&& f) -> future<then_ret_type<F, future<T>>>
+{
+    return then_launched(
+        [id](task& work)
+        {
+            detail::launch_on_process(id, work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename T>
@@ -778,9 +891,8 @@ auto future<T>::then(F&& f) -> future<then_ret_type<F, future<T>>>
 /// shared_future<T>::then() overloads
 //-----------------------------------------------------------------------------
 template<typename T>
-template<typename F>
-auto shared_future<T>::then(thread::id id, std::launch policy, F&& f) const
-    -> future<then_ret_type<F, shared_future<T>>>
+template<typename F, typename Launch>
+auto shared_future<T>::then_launched(Launch launch, F&& f) const -> future<then_ret_type<F, shared_future<T>>>
 {
     detail::check_state(this->state_);
 
@@ -796,12 +908,37 @@ auto shared_future<T>::then(thread::id id, std::launch policy, F&& f) const
     auto& task = package.callable;
 
     state->set_continuation(
-        [id, policy, task = std::move(task)]() mutable
+        [launch, task = std::move(task)]() mutable
         {
-            detail::launch(id, policy, task);
+            launch(task);
         });
 
     return std::move(future);
+}
+
+template<typename T>
+template<typename F>
+auto shared_future<T>::then(thread::id id, std::launch policy, F&& f) const
+    -> future<then_ret_type<F, shared_future<T>>>
+{
+    return then_launched(
+        [id, policy](task& work)
+        {
+            detail::launch(id, policy, work);
+        },
+        std::forward<F>(f));
+}
+
+template<typename T>
+template<typename F>
+auto shared_future<T>::then_on_process(thread::id id, F&& f) const -> future<then_ret_type<F, shared_future<T>>>
+{
+    return then_launched(
+        [id](task& work)
+        {
+            detail::launch_on_process(id, work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename T>
@@ -836,8 +973,8 @@ auto shared_future<T>::then(F&& f) const -> future<then_ret_type<F, shared_futur
 //-----------------------------------------------------------------------------
 /// future<void>::then() overloads
 //-----------------------------------------------------------------------------
-template<typename F>
-auto future<void>::then(thread::id id, std::launch policy, F&& f) -> future<then_ret_type<F, future<void>>>
+template<typename F, typename Launch>
+auto future<void>::then_launched(Launch launch, F&& f) -> future<then_ret_type<F, future<void>>>
 {
     detail::check_state(this->state_);
 
@@ -853,12 +990,34 @@ auto future<void>::then(thread::id id, std::launch policy, F&& f) -> future<then
     auto& task = package.callable;
 
     state->set_continuation(
-        [id, policy, task = std::move(task)]() mutable
+        [launch, task = std::move(task)]() mutable
         {
-            detail::launch(id, policy, task);
+            launch(task);
         });
 
     return std::move(future);
+}
+
+template<typename F>
+auto future<void>::then(thread::id id, std::launch policy, F&& f) -> future<then_ret_type<F, future<void>>>
+{
+    return then_launched(
+        [id, policy](task& work)
+        {
+            detail::launch(id, policy, work);
+        },
+        std::forward<F>(f));
+}
+
+template<typename F>
+auto future<void>::then_on_process(thread::id id, F&& f) -> future<then_ret_type<F, future<void>>>
+{
+    return then_launched(
+        [id](task& work)
+        {
+            detail::launch_on_process(id, work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename F>
@@ -890,9 +1049,8 @@ auto future<void>::then(F&& f) -> future<then_ret_type<F, future<void>>>
 //-----------------------------------------------------------------------------
 /// shared_future<void>::then() overloads
 //-----------------------------------------------------------------------------
-template<typename F>
-auto shared_future<void>::then(thread::id id, std::launch policy, F&& f) const
-    -> future<then_ret_type<F, shared_future<void>>>
+template<typename F, typename Launch>
+auto shared_future<void>::then_launched(Launch launch, F&& f) const -> future<then_ret_type<F, shared_future<void>>>
 {
     detail::check_state(this->state_);
 
@@ -908,12 +1066,35 @@ auto shared_future<void>::then(thread::id id, std::launch policy, F&& f) const
     auto& task = package.callable;
 
     state->set_continuation(
-        [id, policy, task = std::move(task)]() mutable
+        [launch, task = std::move(task)]() mutable
         {
-            detail::launch(id, policy, task);
+            launch(task);
         });
 
     return std::move(future);
+}
+
+template<typename F>
+auto shared_future<void>::then(thread::id id, std::launch policy, F&& f) const
+    -> future<then_ret_type<F, shared_future<void>>>
+{
+    return then_launched(
+        [id, policy](task& work)
+        {
+            detail::launch(id, policy, work);
+        },
+        std::forward<F>(f));
+}
+
+template<typename F>
+auto shared_future<void>::then_on_process(thread::id id, F&& f) const -> future<then_ret_type<F, shared_future<void>>>
+{
+    return then_launched(
+        [id](task& work)
+        {
+            detail::launch_on_process(id, work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename F>

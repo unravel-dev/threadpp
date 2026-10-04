@@ -122,6 +122,29 @@ template<typename F, typename... Args>
 auto dispatch(thread::id id, F&& f, Args&&... args) -> bool;
 
 //-----------------------------------------------------------------------------
+/// Queues a task that only the target thread's own this_thread::process() or
+/// process_for() runs, called from the top of its stack: never a blocking
+/// call (wait, wait_for, sleep_for, a future's wait), which runs the thread's
+/// other tasks wherever it blocks, and never a process() called from inside a
+/// task. For work that must not run in the middle of what the thread is doing
+/// when it blocks, such as changing state that the code around the blocking
+/// call holds references into. Tasks queued while the thread runs these wait
+/// for its next process() call. A thread loop on this_thread::process_and_wait()
+/// (make_thread's is one) runs them; any other thread has to call process().
+/// Notifies the thread.
+//-----------------------------------------------------------------------------
+template<typename F, typename... Args>
+auto invoke_on_process(thread::id id, F&& f, Args&&... args) -> bool;
+
+//-----------------------------------------------------------------------------
+/// If the calling thread is the one passed and is itself running an
+/// on-process task (invoke_on_process) then execute the task directly,
+/// else behave like invoke_on_process.
+//-----------------------------------------------------------------------------
+template<typename F, typename... Args>
+auto dispatch_on_process(thread::id id, F&& f, Args&&... args) -> bool;
+
+//-----------------------------------------------------------------------------
 /// Wakes up a thread if sleeping via any of the itc blocking mechanisms.
 //-----------------------------------------------------------------------------
 void notify(thread::id id);
@@ -208,12 +231,16 @@ auto notified_for_exit() -> bool;
 auto get_id() -> thread::id;
 
 //-----------------------------------------------------------------------------
-/// Process all tasks.
+/// Process all tasks, then, when called from the top of the stack (not from
+/// inside a task), the on-process tasks (invoke_on_process) queued before the
+/// call.
 //-----------------------------------------------------------------------------
 void process();
 
 //-----------------------------------------------------------------------------
-/// Process all tasks until specified timeout_duration has elapsed.
+/// Process all tasks until specified timeout_duration has elapsed, then the
+/// on-process tasks as process() does, while time is left; the rest of those
+/// run first on the next call.
 //-----------------------------------------------------------------------------
 template<typename Rep, typename Period>
 void process_for(const std::chrono::duration<Rep, Period>& rtime);
@@ -222,6 +249,18 @@ void process_for(const std::chrono::duration<Rep, Period>& rtime);
 /// Blocks until notified with an event and process it.
 //-----------------------------------------------------------------------------
 void wait();
+
+//-----------------------------------------------------------------------------
+/// One step of a thread loop: processes all tasks as process() does (the
+/// on-process ones too when called from the top of the stack), then blocks
+/// until more tasks are queued or the thread is notified for exit. A task
+/// queued while the others ran is not missed. make_thread's loop is:
+///     while(!this_thread::notified_for_exit())
+///     {
+///         this_thread::process_and_wait();
+///     }
+//-----------------------------------------------------------------------------
+void process_and_wait();
 
 //-----------------------------------------------------------------------------
 /// Blocks until specified timeout_duration has elapsed or
@@ -289,6 +328,11 @@ auto package_simple_task(F&& f, Args&&... args) -> task
 }
 
 auto invoke_packaged_task(thread::id id, task& f) -> bool;
+// queues the task for the thread's process() calls only (invoke_on_process)
+auto invoke_packaged_task_on_process(thread::id id, task& f) -> bool;
+// true when the calling thread is the one passed and is running an
+// on-process task at its own level (not a task some blocking call of it ran)
+auto is_on_process_point(thread::id id) -> bool;
 } // namespace detail
 
 // apply perfect forwarding to the callable and arguments
@@ -299,6 +343,25 @@ auto invoke(thread::id id, F&& f, Args&&... args) -> bool
 {
     auto task = detail::package_simple_task(std::forward<F>(f), std::forward<Args>(args)...);
     return detail::invoke_packaged_task(id, task);
+}
+
+template<typename F, typename... Args>
+auto invoke_on_process(thread::id id, F&& f, Args&&... args) -> bool
+{
+    auto task = detail::package_simple_task(std::forward<F>(f), std::forward<Args>(args)...);
+    return detail::invoke_packaged_task_on_process(id, task);
+}
+
+template<typename F, typename... Args>
+auto dispatch_on_process(thread::id id, F&& f, Args&&... args) -> bool
+{
+    if(detail::is_on_process_point(id))
+    {
+        // directly call it
+        std::forward<F>(f)(std::forward<Args>(args)...);
+        return true;
+    }
+    return invoke_on_process(id, std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 // apply perfect forwarding to the callable and arguments

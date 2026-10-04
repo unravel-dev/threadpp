@@ -20,6 +20,14 @@ struct thread_context
     std::size_t processing_idx{0};
     std::size_t capacity_shrink_threashold{0};
 
+    // invoke_on_process tasks: queued here, moved to on_process_batch by the
+    // first process() call after the previous batch is done
+    std::vector<task> on_process_tasks;
+    std::vector<task> on_process_batch;
+    std::size_t on_process_idx{0};
+    // processing_stack_depth of the on-process task running, 0 when none
+    std::uint32_t on_process_depth{0};
+
     std::condition_variable wakeup_event;
     std::atomic<std::uint32_t> processing_stack_depth{0};
 
@@ -297,8 +305,9 @@ auto get_pending_task_count_detailed(thread::id id) -> task_info
 
     std::lock_guard<std::mutex> remote_lock(context->tasks_mutex);
 
-    const auto left_to_process = context->processing_tasks.size() - context->processing_idx;
-    const auto pending = context->tasks.size();
+    const auto left_to_process = context->processing_tasks.size() - context->processing_idx +
+                                 context->on_process_batch.size() - context->on_process_idx;
+    const auto pending = context->tasks.size() + context->on_process_tasks.size();
     const auto processing = context->processing_stack_depth.load();
     const auto total = processing + left_to_process + pending;
 
@@ -385,9 +394,11 @@ auto register_thread(std::thread::id id, const std::string& name) -> thread::id
 
 namespace detail
 {
-// this function exists to avoid extra moves of the functor
-// via the dispatch
-auto invoke_packaged_task(thread::id id, task& f) -> bool
+namespace
+{
+// queues the task with the thread's tasks or, for on_process, with its
+// on-process tasks, and notifies the thread
+auto queue_packaged_task(thread::id id, task& f, bool on_process) -> bool
 {
     if(f == nullptr)
     {
@@ -414,10 +425,35 @@ auto invoke_packaged_task(thread::id id, task& f) -> bool
 
     std::lock_guard<std::mutex> remote_lock(context->tasks_mutex);
 
-    context->tasks.emplace_back(std::move(f));
+    auto& queue = on_process ? context->on_process_tasks : context->tasks;
+    queue.emplace_back(std::move(f));
     context->wakeup = true;
     context->wakeup_event.notify_all();
     return true;
+}
+} // namespace
+
+// this function exists to avoid extra moves of the functor
+// via the dispatch
+auto invoke_packaged_task(thread::id id, task& f) -> bool
+{
+    return queue_packaged_task(id, f, false);
+}
+
+auto invoke_packaged_task_on_process(thread::id id, task& f) -> bool
+{
+    return queue_packaged_task(id, f, true);
+}
+
+auto is_on_process_point(thread::id id) -> bool
+{
+    if(!has_local_context())
+    {
+        return false;
+    }
+    const auto& local_context = get_local_context();
+    return local_context.id == id && local_context.on_process_depth != 0 &&
+           local_context.on_process_depth == local_context.processing_stack_depth;
 }
 } // namespace detail
 namespace main_thread
@@ -496,7 +532,75 @@ void process_all(std::unique_lock<std::mutex>& lock)
     }
 }
 
-void process_for(const std::chrono::microseconds& rtime)
+// the thread's state around one on-process task, also when it throws: the
+// depth marks the task and the mutex is unlocked while it runs, and the task
+// is destroyed on the unlocked mutex to allow invoking from its destructor
+struct on_process_task_scope
+{
+    on_process_task_scope(thread_context& context, std::unique_lock<std::mutex>& lock, task& work)
+        : context_(context)
+        , lock_(lock)
+        , work_(work)
+    {
+        context_.processing_stack_depth++;
+        context_.on_process_depth = context_.processing_stack_depth;
+        lock_.unlock();
+    }
+
+    ~on_process_task_scope()
+    {
+        work_ = {};
+        lock_.lock();
+        context_.on_process_depth = 0;
+        context_.processing_stack_depth--;
+    }
+
+    on_process_task_scope(const on_process_task_scope&) = delete;
+    auto operator=(const on_process_task_scope&) -> on_process_task_scope& = delete;
+
+    thread_context& context_;
+    std::unique_lock<std::mutex>& lock_;
+    task& work_;
+};
+
+// runs the current batch of on-process tasks until it is done or end_time;
+// a new batch starts from the queued tasks only once the previous one is done,
+// so tasks queued meanwhile wait for the next call. Runs nothing when called
+// from inside a task.
+void process_on_process(std::unique_lock<std::mutex>& lock, clock::time_point end_time)
+{
+    auto& local_context = get_local_context();
+    if(local_context.processing_stack_depth != 0)
+    {
+        return;
+    }
+
+    if(local_context.on_process_idx >= local_context.on_process_batch.size())
+    {
+        local_context.on_process_batch.clear();
+        std::swap(local_context.on_process_batch, local_context.on_process_tasks);
+        local_context.on_process_idx = 0;
+    }
+
+    while(local_context.on_process_idx < local_context.on_process_batch.size() && !notified_for_exit() &&
+          clock::now() < end_time)
+    {
+        auto work = std::move(local_context.on_process_batch[local_context.on_process_idx]);
+        local_context.on_process_idx++;
+
+        on_process_task_scope scope(local_context, lock, work);
+        if(work)
+        {
+            work();
+        }
+    }
+}
+
+// this_thread::process_and_wait: waits on the queues themselves rather than on
+// the wakeup flag, which wait() clears before blocking, so a task queued while
+// the others ran is not missed. Called from inside a task it can run no
+// on-process task, so those do not end the wait either (it would spin on them).
+void process_and_wait()
 {
     if(!has_local_context())
     {
@@ -509,7 +613,37 @@ void process_for(const std::chrono::microseconds& rtime)
 
     std::unique_lock<std::mutex> lock(local_context.tasks_mutex);
 
+    process_all(lock);
+    process_on_process(lock, clock::time_point::max());
+
+    const bool can_run_on_process = local_context.processing_stack_depth == 0;
+    auto has_work = [&]() -> bool
+    {
+        const bool has_on_process = !local_context.on_process_tasks.empty() ||
+                                    local_context.on_process_idx < local_context.on_process_batch.size();
+        return local_context.exit || !local_context.tasks.empty() || has_tasks_to_process(local_context) ||
+               (can_run_on_process && has_on_process);
+    };
+    local_context.wakeup_event.wait(lock, has_work);
+    local_context.wakeup = false;
+}
+
+void process_for(const std::chrono::microseconds& rtime)
+{
+    if(!has_local_context())
+    {
+        log_error_func("Calling functions in the this_thread namespace "
+                       "requires the thread to be already registered by calling "
+                       "this_thread::register_this_thread");
+        return;
+    }
+    auto& local_context = get_local_context();
+    const auto end_time = clock::now() + rtime;
+
+    std::unique_lock<std::mutex> lock(local_context.tasks_mutex);
+
     process_all_for(lock, rtime);
+    process_on_process(lock, end_time);
 }
 
 void process()
@@ -526,6 +660,7 @@ void process()
     std::unique_lock<std::mutex> lock(local_context.tasks_mutex);
 
     process_all(lock);
+    process_on_process(lock, clock::time_point::max());
 }
 
 auto wait_for(const std::chrono::microseconds& wait_duration) -> std::cv_status
@@ -661,6 +796,11 @@ void wait()
     detail::wait();
 }
 
+void process_and_wait()
+{
+    detail::process_and_wait();
+}
+
 auto get_id() -> thread::id
 {
     if(!has_local_context())
@@ -707,7 +847,7 @@ auto make_thread(const std::string& name) -> thread
 
                  while(!this_thread::notified_for_exit())
                  {
-                     this_thread::wait();
+                     this_thread::process_and_wait();
                  }
 
                  this_thread::unregister_this_thread();

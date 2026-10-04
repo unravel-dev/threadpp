@@ -5,6 +5,7 @@
 #include "condition_variable_tests.h"
 #include "fututre_promise_tests.h"
 #include "invoke_tests.h"
+#include "on_process_tests.h"
 #include "overhead_tests.h"
 #include "thread_pool_tests.h"
 
@@ -27,6 +28,7 @@ int main()
     async_tests::run_tests(50);
     when_tests::run_tests(50);
     thread_pool_tests::run_tests(50);
+    on_process_tests::run_tests();
 
 	tpp::shutdown();
 	return 0;
