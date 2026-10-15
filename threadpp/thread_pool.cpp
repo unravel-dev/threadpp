@@ -1,5 +1,6 @@
 #include "thread_pool.h"
 
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -22,9 +23,19 @@ class thread_pool::impl
     struct job_info
     {
         job_handle handle;
+        /// Kept out of the handle: handles are copied through the priority queues.
+        std::string detail;
 
         task callable;
         shared_future<void> callable_future;
+    };
+
+    /// A job from the moment a worker takes it until it returns.
+    struct running_entry
+    {
+        std::string name;
+        std::string detail;
+        std::chrono::steady_clock::time_point start;
     };
 
     friend bool operator<(const job_handle& lhs, const job_handle& rhs)
@@ -80,7 +91,7 @@ public:
         workers.clear();
     }
 
-    auto add_job(task& user_job, priority::group group, const std::string& name, bool queue = true) -> job_id
+    auto add_job(task& user_job, priority::group group, const job_desc& desc, bool queue = true) -> job_id
     {
         auto packaged_task = detail::package_future_task(std::move(user_job));
         std::vector<worker_wakeup> wakeups;
@@ -92,7 +103,8 @@ public:
             auto& job = target[id];
             job.handle.id = id;
             job.handle.group = group;
-            job.handle.name = name;
+            job.handle.name = desc.name;
+            job.detail = desc.detail;
             job.callable = std::move(packaged_task.callable);
             job.callable_future = packaged_task.callable_future.share();
             if(queue)
@@ -222,40 +234,43 @@ public:
         }
     }
 
-    void wait_all(priority::category category, const on_progress_callback& on_progress)
+    /// A job a wait_all with progress is for.
+    struct waited_job
     {
-        
-        struct job_info_wrapper
-        {
-            job_handle handle;
-            shared_future<void> future;
-        };
+        std::string name;
+        std::string detail;
+        shared_future<void> future;
+    };
 
-        std::vector<job_info_wrapper> futures;
+    auto collect_waited_jobs(priority::category category) const -> std::vector<waited_job>
+    {
+        std::vector<waited_job> futures;
+        std::lock_guard<std::mutex> lock(guard_);
+        futures.reserve(jobs_.size());
+        for(const auto& kvp : jobs_)
         {
-            std::lock_guard<std::mutex> lock(guard_);
-            futures.reserve(jobs_.size());
-            for(const auto& kvp : jobs_)
+            const auto& job = kvp.second;
+            if(job.handle.group.level >= category)
             {
-                auto& job = kvp.second;
-                if(job.handle.group.level >= category)
-                {
-                    job_info_wrapper wrapper;
-                    wrapper.handle = job.handle;
-                    wrapper.future = job.callable_future;
-                    futures.emplace_back(std::move(wrapper));
-                }
+                futures.push_back({job.handle.name, job.detail, job.callable_future});
             }
         }
+        return futures;
+    }
+
+    void wait_all(priority::category category, const on_progress_callback& on_progress)
+    {
+        const std::vector<waited_job> futures = collect_waited_jobs(category);
         size_t current_job = 0;
-        for(const auto& wrapper : futures)
+        for(const auto& waited : futures)
         {
-            wrapper.future.wait();
+            waited.future.wait();
             current_job++;
             if(on_progress)
             {
                 progress_info info;
-                info.name = wrapper.handle.name;
+                info.name = waited.name;
+                info.detail = waited.detail;
                 info.current_job = current_job;
                 info.total_jobs = futures.size();
                 on_progress(info);
@@ -265,49 +280,68 @@ public:
 
     void wait_all_polling(priority::category category, const on_progress_callback& on_progress)
     {
-        
-        struct job_info_wrapper
+        const std::vector<waited_job> futures = collect_waited_jobs(category);
+        // Counted on every report, not taken from the position of the waited job: the jobs
+        // finish in any order, and the one waited on may be the last to.
+        const auto count_finished = [&futures]() -> size_t
         {
-            job_handle handle;
-            shared_future<void> future;
+            return static_cast<size_t>(std::count_if(futures.begin(),
+                                                     futures.end(),
+                                                     [](const waited_job& waited)
+                                                     {
+                                                         return waited.future.is_ready();
+                                                     }));
         };
-
-        std::vector<job_info_wrapper> futures;
+        for(const auto& waited : futures)
         {
-            std::lock_guard<std::mutex> lock(guard_);
-            futures.reserve(jobs_.size());
-            for(const auto& kvp : jobs_)
+            while(!waited.future.is_ready())
             {
-                auto& job = kvp.second;
-                if(job.handle.group.level >= category)
-                {
-                    job_info_wrapper wrapper;
-                    wrapper.handle = job.handle;
-                    wrapper.future = job.callable_future;
-                    futures.emplace_back(std::move(wrapper));
-                }
-            }
-        }
-        size_t current_job = 0;
-        for(const auto& wrapper : futures)
-        {
-            while(!wrapper.future.is_ready())
-            {
-                wrapper.future.wait_for(std::chrono::milliseconds(16));
+                waited.future.wait_for(std::chrono::milliseconds(16));
                 if(on_progress)
                 {
                     progress_info info;
-                    info.name = wrapper.handle.name;
-                    info.current_job = current_job;
+                    info.name = waited.name;
+                    info.detail = waited.detail;
+                    info.current_job = count_finished();
                     info.total_jobs = futures.size();
                     on_progress(info);
                 }
             }
-
-            current_job++;
         }
     }
 
+    auto get_running_jobs() const -> std::vector<running_job>
+    {
+        std::vector<running_job> result;
+        {
+            std::lock_guard<std::mutex> lock(guard_);
+            const auto now = std::chrono::steady_clock::now();
+            result.reserve(running_.size());
+            for(const auto& kvp : running_)
+            {
+                const running_entry& entry = kvp.second;
+                result.push_back({entry.name, entry.detail, now - entry.start});
+            }
+        }
+        std::sort(result.begin(),
+                  result.end(),
+                  [](const running_job& lhs, const running_job& rhs)
+                  {
+                      return lhs.elapsed > rhs.elapsed;
+                  });
+        return result;
+    }
+
+    auto get_workers_count() const -> size_t
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        size_t count = 0;
+        for(const auto& kvp : workers_)
+        {
+            count += kvp.second.size();
+        }
+        return count;
+    }
 
     auto get_jobs_count() const -> size_t
     {
@@ -430,6 +464,7 @@ private:
         {
             id = job.handle.id;
             user_job = std::move(job.callable);
+            running_[id] = {job.handle.name, job.detail, std::chrono::steady_clock::now()};
             return take_result::taken;
         }
         return take_result::skip;
@@ -459,8 +494,15 @@ private:
             {
                 user_job();
             }
-            clear(id, false);
+            finish_job(id);
         }
+    }
+
+    void finish_job(job_id id)
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        running_.erase(id);
+        jobs_.erase(id);
     }
 
     mutable std::mutex guard_;
@@ -469,6 +511,8 @@ private:
     std::map<priority::category, bool> pending_wake_;
     std::unordered_map<job_id, job_info> jobs_;
     std::unordered_map<job_id, job_info> deferred_jobs_;
+    /// Outlives a clear_all: the jobs in it are still running.
+    std::unordered_map<job_id, running_entry> running_;
     priority_queues job_priority_queues_;
 };
 
@@ -484,9 +528,9 @@ thread_pool::thread_pool(const std::map<priority::category, size_t>& workers_per
 
 thread_pool::~thread_pool() = default;
 
-job_id thread_pool::add_job(task& job, priority::group group, const std::string& name, bool queue)
+job_id thread_pool::add_job(task& job, priority::group group, const job_desc& desc, bool queue)
 {
-    return impl_->add_job(job, group, name, queue);
+    return impl_->add_job(job, group, desc, queue);
 }
 
 auto thread_pool::submit(job_id id) -> bool
@@ -542,6 +586,16 @@ size_t thread_pool::get_jobs_count(priority::category category) const
 std::map<std::string, size_t> thread_pool::get_jobs_count_detailed() const
 {
     return impl_->get_jobs_count_detailed();
+}
+
+auto thread_pool::get_running_jobs() const -> std::vector<running_job>
+{
+    return impl_->get_running_jobs();
+}
+
+auto thread_pool::get_workers_count() const -> size_t
+{
+    return impl_->get_workers_count();
 }
 
 void job_future_storage::change_priority(priority::group group)

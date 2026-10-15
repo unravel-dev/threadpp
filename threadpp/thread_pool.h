@@ -1,9 +1,11 @@
 #pragma once
 
 #include "future.hpp"
+#include <chrono>
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 namespace tpp
 {
 
@@ -193,6 +195,28 @@ template<typename F, typename... Args>
 using job_ret_type = callable_ret_type<F, Args...>;
 
 //-----------------------------------------------------------------------------
+/// What a job is, for whoever watches the pool. The name says what kind of
+/// work it is and groups jobs of a kind (get_jobs_count_detailed counts by it);
+/// the detail tells one job of that kind from another, e.g. the file it works on.
+//-----------------------------------------------------------------------------
+struct job_desc
+{
+    std::string name{};
+    std::string detail{};
+};
+
+//-----------------------------------------------------------------------------
+/// A job a worker is running, as get_running_jobs saw it.
+//-----------------------------------------------------------------------------
+struct running_job
+{
+    std::string name{};
+    std::string detail{};
+    /// How long it had been running when the snapshot was taken.
+    std::chrono::steady_clock::duration elapsed{};
+};
+
+//-----------------------------------------------------------------------------
 /// Thread pool class. Can have multiple priority groups.
 //-----------------------------------------------------------------------------
 class thread_pool
@@ -220,6 +244,9 @@ public:
     /// Returns a future to the job.
     //-----------------------------------------------------------------------------
     template<typename F, typename... Args>
+    auto schedule(const job_desc& desc, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
+
+    template<typename F, typename... Args>
     auto schedule(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
 
     template<typename F, typename... Args>
@@ -234,6 +261,9 @@ public:
 
 
     template<typename F, typename... Args>
+    auto schedule(const job_desc& desc, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
+
+    template<typename F, typename... Args>
     auto schedule(const std::string& name, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
 
     //-----------------------------------------------------------------------------
@@ -241,6 +271,9 @@ public:
     /// but does NOT queue it to workers. The callable is held on the future
     /// itself. Call submit() on the returned future to actually start execution.
     //-----------------------------------------------------------------------------
+    template<typename F, typename... Args>
+    auto create_job(const job_desc& desc, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
+
     template<typename F, typename... Args>
     auto create_job(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>;
 
@@ -291,23 +324,40 @@ public:
     void wait_all();
     struct progress_info
     {
+        /// The job the wait is on, one that has not finished yet.
         std::string name{};
+        std::string detail{};
+        /// How many of the jobs the wait is for have finished.
         size_t current_job{};
         size_t total_jobs{};
     };
     using on_progress_callback = std::function<void(const progress_info& info)>;
     void wait_all(priority::category category, const on_progress_callback& on_progress = nullptr);
+    //-----------------------------------------------------------------------------
+    /// Waits for the jobs of the category and above that are in the pool when
+    /// it is called, and reports every few milliseconds while it waits.
+    //-----------------------------------------------------------------------------
     void wait_all_polling(priority::category category, const on_progress_callback& on_progress = nullptr);
 
     //-----------------------------------------------------------------------------
-    /// Returns the number of jobs left.
+    /// Returns the number of jobs left, the running ones included.
     //-----------------------------------------------------------------------------
     auto get_jobs_count() const -> size_t;
     auto get_jobs_count_detailed() const -> std::map<std::string, size_t>;
     auto get_jobs_count(priority::category category) const -> size_t;
 
+    //-----------------------------------------------------------------------------
+    /// The jobs the workers are running right now, the longest running first.
+    //-----------------------------------------------------------------------------
+    auto get_running_jobs() const -> std::vector<running_job>;
+
+    //-----------------------------------------------------------------------------
+    /// Returns the number of workers of all priority levels.
+    //-----------------------------------------------------------------------------
+    auto get_workers_count() const -> size_t;
+
 private:
-    auto add_job(task& job, priority::group group, const std::string& name, bool queue = true) -> job_id;
+    auto add_job(task& job, priority::group group, const job_desc& desc, bool queue = true) -> job_id;
 
     class impl;
     /// pimpl idiom
@@ -317,60 +367,80 @@ private:
 };
 
 template<typename F, typename... Args>
-auto thread_pool::schedule(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+auto thread_pool::schedule(const job_desc& desc, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
     auto packaged_task = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
     job_future<async_ret_type<F, Args...>> fut(std::move(packaged_task.callable_future));
-    fut.id = add_job(packaged_task.callable, group, name);
+    fut.id = add_job(packaged_task.callable, group, desc);
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
     return fut;
 }
+
+template<typename F, typename... Args>
+auto thread_pool::schedule(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+{
+    return schedule(job_desc{name, {}}, group, std::forward<F>(f), std::forward<Args>(args)...);
+}
+
 template<typename F, typename... Args>
 auto thread_pool::schedule(priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return schedule({}, group, std::forward<F>(f), std::forward<Args>(args)...);
+    return schedule(job_desc{}, group, std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template<typename F, typename... Args>
 auto thread_pool::schedule(F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return schedule({}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+    return schedule(job_desc{}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+}
+
+template<typename F, typename... Args>
+auto thread_pool::schedule(const job_desc& desc, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+{
+    return schedule(desc, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template<typename F, typename... Args>
 auto thread_pool::schedule(const std::string& name, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return schedule(name, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+    return schedule(job_desc{name, {}}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template<typename F, typename... Args>
-auto thread_pool::create_job(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+auto thread_pool::create_job(const job_desc& desc, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
     auto packaged_task = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
     job_future<async_ret_type<F, Args...>> fut(std::move(packaged_task.callable_future));
-    fut.id = add_job(packaged_task.callable, group, name, false);
+    fut.id = add_job(packaged_task.callable, group, desc, false);
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
     fut.submitted_ = false;
     return fut;
 }
+
+template<typename F, typename... Args>
+auto thread_pool::create_job(const std::string& name, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
+{
+    return create_job(job_desc{name, {}}, group, std::forward<F>(f), std::forward<Args>(args)...);
+}
+
 template<typename F, typename... Args>
 auto thread_pool::create_job(priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return create_job({}, group, std::forward<F>(f), std::forward<Args>(args)...);
+    return create_job(job_desc{}, group, std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template<typename F, typename... Args>
 auto thread_pool::create_job(F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return create_job({}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+    return create_job(job_desc{}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template<typename F, typename... Args>
 auto thread_pool::create_job(const std::string& name, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
 {
-    return create_job(name, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
+    return create_job(job_desc{name, {}}, priority::normal(), std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 } // namespace tpp
