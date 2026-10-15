@@ -104,7 +104,13 @@ void run_monitoring_tests()
 		held_job held;
 		auto job = pool.schedule(tpp::job_desc{"Compiling Texture", "textures/rock.png"}, [&held]() { held.run(); });
 		EXPECT(poll_until([&held]() { return held.is_started.load(); }));
-		std::this_thread::sleep_for(20ms);
+		// Timed on the clock the pool reads, not with one sleep: a sleep can end early by part of
+		// a timer tick. The job started before it said so, so it has run at least this long.
+		const auto seen_running = std::chrono::steady_clock::now();
+		while(std::chrono::steady_clock::now() - seen_running < 20ms)
+		{
+			std::this_thread::sleep_for(1ms);
+		}
 
 		const auto running = pool.get_running_jobs();
 		EXPECT(running.size() == 1u);
