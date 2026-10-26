@@ -253,6 +253,20 @@ void run_shared_future_tests()
 		EXPECT(is_every_job_run_once);
 	};
 
+	TEST_CASE("thread pool : a copy of a deferred shared future taken before another copy submits sees the submission")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 2}});
+		auto job = pool.create_job([]() { return 7; }).share();
+		const auto copy = job;
+		EXPECT(!copy.is_submitted());
+		job.submit();
+		EXPECT(copy.is_submitted());
+		copy.submit();
+		EXPECT(copy.is_submitted());
+		EXPECT(copy.get() == 7);
+		pool.wait_all();
+	};
+
 	TEST_CASE("thread pool : many threads reading a ready shared future get its one stored value")
 	{
 		constexpr int thread_count = 16;

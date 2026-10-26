@@ -626,20 +626,20 @@ void job_future_storage::stop()
 
 void job_future_storage::submit() const
 {
-    if(submitted_.load(std::memory_order_acquire) || owner_ == nullptr || sentinel_.expired())
+    if(is_submitted() || owner_ == nullptr || sentinel_.expired())
     {
         return;
     }
 
     // One caller submits; the others see the job taken. The flag still ends up as the pool's
     // answer: false when the pool no longer holds the job as deferred.
-    if(submitted_.exchange(true, std::memory_order_acq_rel))
+    if(submitted_->exchange(true, std::memory_order_acq_rel))
     {
         return;
     }
     if(!owner_->submit(id))
     {
-        submitted_.store(false, std::memory_order_release);
+        submitted_->store(false, std::memory_order_release);
     }
 }
 

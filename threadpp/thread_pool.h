@@ -65,36 +65,6 @@ struct job_future_storage
     job_id id = 0;
 
     job_future_storage() = default;
-    job_future_storage(const job_future_storage& other)
-        : id(other.id)
-        , sentinel_(other.sentinel_)
-        , owner_(other.owner_)
-        , submitted_(other.submitted_.load(std::memory_order_acquire))
-    {
-    }
-    job_future_storage(job_future_storage&& other) noexcept
-        : id(other.id)
-        , sentinel_(std::move(other.sentinel_))
-        , owner_(other.owner_)
-        , submitted_(other.submitted_.load(std::memory_order_acquire))
-    {
-    }
-    auto operator=(const job_future_storage& other) -> job_future_storage&
-    {
-        id = other.id;
-        sentinel_ = other.sentinel_;
-        owner_ = other.owner_;
-        submitted_.store(other.submitted_.load(std::memory_order_acquire), std::memory_order_release);
-        return *this;
-    }
-    auto operator=(job_future_storage&& other) noexcept -> job_future_storage&
-    {
-        id = other.id;
-        sentinel_ = std::move(other.sentinel_);
-        owner_ = other.owner_;
-        submitted_.store(other.submitted_.load(std::memory_order_acquire), std::memory_order_release);
-        return *this;
-    }
 
     //-----------------------------------------------------------------------------
     /// Changes the priority level of the specified job.
@@ -119,14 +89,18 @@ struct job_future_storage
     /// Returns true if the job has been submitted to the work queue.
     /// Deferred jobs return false until submit() is called.
     //-----------------------------------------------------------------------------
-    auto is_submitted() const -> bool { return submitted_.load(std::memory_order_acquire); }
+    auto is_submitted() const -> bool
+    {
+        return submitted_ == nullptr || submitted_->load(std::memory_order_acquire);
+    }
 
 private:
     std::weak_ptr<int> sentinel_{};
     thread_pool* owner_{};
-    /// Whether the pool took the job. Atomic because submit() is const and shared futures are
-    /// read, and submitted, from any thread.
-    mutable std::atomic<bool> submitted_{true};
+    /// Whether the pool took a deferred job; null for a job scheduled at once. One flag for every copy
+    /// of the future, so a copy taken before another one submitted sees the submission. Atomic
+    /// because submit() is const and copies are read, and submitted, from any thread.
+    std::shared_ptr<std::atomic<bool>> submitted_{};
 };
 
 template<typename T>
@@ -451,7 +425,7 @@ auto thread_pool::create_job(const job_desc& desc, priority::group group, F&& f,
     fut.id = add_job(packaged_task.callable, group, desc, false);
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
-    fut.submitted_.store(false, std::memory_order_release);
+    fut.submitted_ = std::make_shared<std::atomic<bool>>(false);
     return fut;
 }
 
