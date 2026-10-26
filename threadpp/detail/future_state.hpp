@@ -90,6 +90,11 @@ struct basic_state
 
     void wait()
     {
+        // The status turns ready last, under the lock, after the value or exception is stored.
+        if(ready())
+        {
+            return;
+        }
         std::unique_lock<std::mutex> lock(guard);
         while(!ready())
         {
@@ -152,7 +157,12 @@ struct future_state : public basic_state<T>
 
     auto get_value_assuming_ready() -> decltype(auto)
     {
-        std::unique_lock<std::mutex> lock(this->guard);
+        // A ready state never stores a value or exception again, so it reads without the lock.
+        std::unique_lock<std::mutex> lock(this->guard, std::defer_lock);
+        if(!this->ready())
+        {
+            lock.lock();
+        }
 
         if(value)
         {

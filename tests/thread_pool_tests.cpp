@@ -212,6 +212,78 @@ void run_monitoring_tests()
 	};
 }
 
+void run_shared_future_tests()
+{
+	TEST_CASE("thread pool : a deferred job submitted from many threads through one shared future runs once")
+	{
+		constexpr int thread_count = 16;
+		constexpr int rounds = 200;
+		tpp::thread_pool pool({{tpp::priority::category::normal, 4}});
+		bool is_every_job_run_once = true;
+		bool is_every_job_submitted = true;
+		for(int round = 0; round < rounds; ++round)
+		{
+			std::atomic<int> runs{0};
+			auto job = pool.create_job([&runs]() {
+				runs.fetch_add(1, std::memory_order_relaxed);
+				return 7;
+			}).share();
+			std::atomic<bool> go{false};
+			std::vector<std::thread> threads;
+			for(int t = 0; t < thread_count; ++t)
+			{
+				threads.emplace_back([&]() {
+					while(!go.load(std::memory_order_acquire))
+					{
+					}
+					job.submit();
+				});
+			}
+			go.store(true, std::memory_order_release);
+			for(auto& thread : threads)
+			{
+				thread.join();
+			}
+			is_every_job_submitted = is_every_job_submitted && job.is_submitted();
+			is_every_job_run_once = is_every_job_run_once && job.get() == 7;
+			pool.wait_all();
+			is_every_job_run_once = is_every_job_run_once && runs.load() == 1;
+		}
+		EXPECT(is_every_job_submitted);
+		EXPECT(is_every_job_run_once);
+	};
+
+	TEST_CASE("thread pool : many threads reading a ready shared future get its one stored value")
+	{
+		constexpr int thread_count = 16;
+		constexpr int reads = 20000;
+		tpp::thread_pool pool({{tpp::priority::category::normal, 2}});
+		auto job = pool.schedule([]() { return std::string("a value longer than the small string buffer"); }).share();
+		job.wait();
+		const std::string* stored = &job.get();
+		std::atomic<int> mismatches{0};
+		std::vector<std::thread> threads;
+		for(int t = 0; t < thread_count; ++t)
+		{
+			threads.emplace_back([&]() {
+				for(int i = 0; i < reads; ++i)
+				{
+					const auto& value = job.get();
+					if(&value != stored || value != "a value longer than the small string buffer")
+					{
+						mismatches.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+			});
+		}
+		for(auto& thread : threads)
+		{
+			thread.join();
+		}
+		EXPECT(mismatches.load() == 0);
+	};
+}
+
 void run_tests(int iterations)
 {
 	auto now = tpp::clock::now();
@@ -270,6 +342,7 @@ void run_tests(int iterations)
 	pool.wait_all();
 	run_burst_tests();
 	run_monitoring_tests();
+	run_shared_future_tests();
 
 	auto end = tpp::clock::now();
 	auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - now);
