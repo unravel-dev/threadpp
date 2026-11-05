@@ -49,7 +49,10 @@ class thread_pool::impl
     using priority_queues = std::map<priority::category, jobs_queue>;
 
 public:
-    impl(const std::map<priority::category, size_t>& workers_per_priority_level, tasks_capacity_config config)
+    impl(const std::map<priority::category, size_t>& workers_per_priority_level,
+         tasks_capacity_config config,
+         std::weak_ptr<int> sentinel)
+        : sentinel_(std::move(sentinel))
     {
         jobs_.reserve(config.default_reserved_tasks);
         for(const auto& kvp : workers_per_priority_level)
@@ -107,6 +110,10 @@ public:
             job.detail = desc.detail;
             job.callable = std::move(packaged_task.callable);
             job.callable_future = packaged_task.callable_future.share();
+            if(workers_.empty())
+            {
+                job.callable_future._internal_get_state()->set_inline_runner(make_inline_runner(id));
+            }
             if(queue)
             {
                 queue_job_handle(job.handle, wakeups);
@@ -310,6 +317,50 @@ public:
         }
     }
 
+    auto run_pending(std::chrono::steady_clock::duration budget) -> size_t
+    {
+        const auto start = std::chrono::steady_clock::now();
+        size_t run_count = 0;
+        for(;;)
+        {
+            task user_job;
+            job_id id = 0;
+            const auto result = try_take_next_job(user_job, id);
+            if(result == take_result::empty)
+            {
+                return run_count;
+            }
+            if(result == take_result::skip)
+            {
+                continue;
+            }
+            user_job();
+            finish_job(id);
+            ++run_count;
+            if(std::chrono::steady_clock::now() - start >= budget)
+            {
+                return run_count;
+            }
+        }
+    }
+
+    /// A runner that runs job @a id on the calling thread, as long as the pool lives; empty when the pool
+    /// has workers. Holds the impl, which outlives every move of the pool, and the pool's sentinel.
+    auto make_inline_runner(job_id id) -> task
+    {
+        if(!workers_.empty())
+        {
+            return {};
+        }
+        return [this, sentinel = sentinel_, id]()
+        {
+            if(!sentinel.expired())
+            {
+                run_job(id);
+            }
+        };
+    }
+
     auto get_running_jobs() const -> std::vector<running_job>
     {
         std::vector<running_job> result;
@@ -462,12 +513,56 @@ private:
         // take moves callable; later handles still find the job but have nothing to run.
         if(level <= job.handle.group.level && job.callable)
         {
-            id = job.handle.id;
-            user_job = std::move(job.callable);
-            running_[id] = {job.handle.name, job.detail, std::chrono::steady_clock::now()};
+            take_locked(job, user_job, id);
             return take_result::taken;
         }
         return take_result::skip;
+    }
+
+    /// Takes the next job of the highest priority, whatever the level, for run_pending.
+    auto try_take_next_job(task& user_job, job_id& id) -> take_result
+    {
+        std::lock_guard<std::mutex> lock(guard_);
+        auto& job_queue = get_highest_priority_queue_above(priority::category::low);
+        if(job_queue.empty())
+        {
+            return take_result::empty;
+        }
+        const auto handle = job_queue.top();
+        job_queue.pop();
+        auto it = jobs_.find(handle.id);
+        if(it == jobs_.end() || !it->second.callable)
+        {
+            return take_result::skip;
+        }
+        take_locked(it->second, user_job, id);
+        return take_result::taken;
+    }
+
+    /// Runs the queued job @a id on the calling thread unless it was taken already. Its handle stays in its
+    /// queue; whoever pops it later finds the job gone and skips it.
+    void run_job(job_id id)
+    {
+        task user_job;
+        {
+            std::lock_guard<std::mutex> lock(guard_);
+            auto it = jobs_.find(id);
+            if(it == jobs_.end() || !it->second.callable)
+            {
+                return;
+            }
+            take_locked(it->second, user_job, id);
+        }
+        user_job();
+        finish_job(id);
+    }
+
+    /// Moves the job's callable out to run on the caller and records the job as running. Under the guard.
+    void take_locked(job_info& job, task& user_job, job_id& id)
+    {
+        id = job.handle.id;
+        user_job = std::move(job.callable);
+        running_[id] = {job.handle.name, job.detail, std::chrono::steady_clock::now()};
     }
 
     void check_jobs(priority::category level)
@@ -505,6 +600,8 @@ private:
         jobs_.erase(id);
     }
 
+    /// The pool's sentinel: expires when the pool is destroyed, which an inline runner checks.
+    std::weak_ptr<int> sentinel_;
     mutable std::mutex guard_;
     job_id free_id_ = 1;
     priority_workers workers_;
@@ -523,7 +620,7 @@ thread_pool::thread_pool() : thread_pool({{priority::category::low, thread::hard
 thread_pool::thread_pool(const std::map<priority::category, size_t>& workers_per_priority_level,
                          tasks_capacity_config config)
 {
-    impl_ = std::make_unique<impl>(workers_per_priority_level, config);
+    impl_ = std::make_unique<impl>(workers_per_priority_level, config, sentinel_);
 }
 
 thread_pool::~thread_pool() = default;
@@ -571,6 +668,16 @@ void thread_pool::wait_all(priority::category category, const on_progress_callba
 void thread_pool::wait_all_polling(priority::category category, const on_progress_callback& on_progress)
 {
     impl_->wait_all_polling(category, on_progress);
+}
+
+auto thread_pool::run_pending(std::chrono::steady_clock::duration budget) -> size_t
+{
+    return impl_->run_pending(budget);
+}
+
+auto thread_pool::make_inline_runner(job_id id) const -> task
+{
+    return impl_->make_inline_runner(id);
 }
 
 size_t thread_pool::get_jobs_count() const

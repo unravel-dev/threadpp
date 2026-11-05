@@ -238,6 +238,11 @@ public:
     /// tpp::thread_pool pool({{tpp::priority::category::normal, 2},
     ///					       {tpp::priority::category::high, 1},
     ///					       {tpp::priority::category::critical, 1}});
+    ///
+    /// A pool with no workers at all, for a program that has no threads to give it,
+    /// runs a queued job on the thread that waits for it (any wait on the job's
+    /// future, wait() or wait_all()) and in run_pending(), which such a program calls
+    /// regularly for the jobs nobody waits for.
     //-----------------------------------------------------------------------------
     thread_pool(const std::map<priority::category, size_t>& workers_per_priority_level,
                 tasks_capacity_config config = {});
@@ -350,6 +355,13 @@ public:
     void wait_all_polling(priority::category category, const on_progress_callback& on_progress = nullptr);
 
     //-----------------------------------------------------------------------------
+    /// Runs queued jobs on the calling thread, the highest priority first, until none
+    /// is left or the budget is spent; at least one when any is queued. Returns how
+    /// many it ran. Deferred jobs that were never submitted are not run.
+    //-----------------------------------------------------------------------------
+    auto run_pending(std::chrono::steady_clock::duration budget) -> size_t;
+
+    //-----------------------------------------------------------------------------
     /// Returns the number of jobs left, the running ones included.
     //-----------------------------------------------------------------------------
     auto get_jobs_count() const -> size_t;
@@ -369,12 +381,27 @@ public:
 private:
     auto add_job(task& job, priority::group group, const job_desc& desc, bool queue = true) -> job_id;
 
+    /// The runner a waiter on job @a id calls to run it itself; empty when the pool has workers.
+    auto make_inline_runner(job_id id) const -> task;
+
+    template<typename T>
+    void attach_inline_runner(job_future<T>& fut) const;
+
     class impl;
     /// pimpl idiom
     std::unique_ptr<impl> impl_;
 
     std::shared_ptr<int> sentinel_ = std::make_shared<int>();
 };
+
+template<typename T>
+void thread_pool::attach_inline_runner(job_future<T>& fut) const
+{
+    if(auto runner = make_inline_runner(fut.id))
+    {
+        fut._internal_get_state()->set_inline_runner(std::move(runner));
+    }
+}
 
 template<typename F, typename... Args>
 auto thread_pool::schedule(const job_desc& desc, priority::group group, F&& f, Args&&... args) -> job_future<job_ret_type<F, Args...>>
@@ -384,6 +411,7 @@ auto thread_pool::schedule(const job_desc& desc, priority::group group, F&& f, A
     fut.id = add_job(packaged_task.callable, group, desc);
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
+    attach_inline_runner(fut);
     return fut;
 }
 
@@ -426,6 +454,7 @@ auto thread_pool::create_job(const job_desc& desc, priority::group group, F&& f,
     fut.sentinel_ = sentinel_;
     fut.owner_ = this;
     fut.submitted_ = std::make_shared<std::atomic<bool>>(false);
+    attach_inline_runner(fut);
     return fut;
 }
 

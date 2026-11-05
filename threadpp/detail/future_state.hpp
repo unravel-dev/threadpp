@@ -23,6 +23,9 @@ struct basic_state
     condition_variable cv;
     mutable std::mutex guard;
     callback_container callbacks;
+    /// Runs the job that sets this state on the thread that waits for it. Only a thread pool without
+    /// workers sets one, since no other thread would ever run the job; cleared once the state is ready.
+    task inline_runner;
 
     std::exception_ptr exception;
 
@@ -58,6 +61,7 @@ struct basic_state
             status = s;
             continuations = std::move(callbacks);
             callbacks.clear();
+            inline_runner = nullptr;
             cv.notify_all();
         }
 
@@ -88,6 +92,34 @@ struct basic_state
         }
     }
 
+    void set_inline_runner(task runner)
+    {
+        std::lock_guard<std::mutex> lock(guard);
+        if(!ready())
+        {
+            inline_runner = std::move(runner);
+        }
+    }
+
+    /// Runs the inline runner on the calling thread when the state has one and is not ready. A runner
+    /// that finds its job already taken (run by another waiter) returns, and the caller waits as usual.
+    void run_inline() const
+    {
+        if(ready())
+        {
+            return;
+        }
+        task runner;
+        {
+            std::lock_guard<std::mutex> lock(guard);
+            runner = inline_runner;
+        }
+        if(runner)
+        {
+            runner();
+        }
+    }
+
     void wait()
     {
         // The status turns ready last, under the lock, after the value or exception is stored.
@@ -95,6 +127,7 @@ struct basic_state
         {
             return;
         }
+        run_inline();
         std::unique_lock<std::mutex> lock(guard);
         while(!ready())
         {
@@ -109,6 +142,7 @@ struct basic_state
     template<typename Rep, typename Per>
     auto wait_for(const std::chrono::duration<Rep, Per>& timeout_duration) const -> std::future_status
     {
+        run_inline();
         std::unique_lock<std::mutex> lock(guard);
 
         while(!ready())

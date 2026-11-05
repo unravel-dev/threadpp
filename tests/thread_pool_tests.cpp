@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -298,6 +299,123 @@ void run_shared_future_tests()
 	};
 }
 
+void run_inline_tests()
+{
+	TEST_CASE("thread pool : a pool without workers runs a job on the thread that waits for it")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		EXPECT(pool.get_workers_count() == 0u);
+		std::thread::id ran_on{};
+		auto job = pool.schedule([&ran_on]() {
+			ran_on = std::this_thread::get_id();
+			return 7;
+		});
+		EXPECT(!job.is_ready());
+		EXPECT(job.get() == 7);
+		EXPECT(ran_on == std::this_thread::get_id());
+		EXPECT(pool.get_jobs_count() == 0u);
+	};
+
+	TEST_CASE("thread pool : a pool without workers runs a job once for every copy of its shared future")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		int runs = 0;
+		auto job = pool.schedule([&runs]() { return ++runs; }).share();
+		const auto copy = job;
+		copy.wait();
+		EXPECT(job.is_ready());
+		EXPECT(job.get() == 1);
+		EXPECT(copy.get() == 1);
+		EXPECT(runs == 1);
+	};
+
+	TEST_CASE("thread pool : a pool without workers runs a deferred job when it is got, not before")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		int runs = 0;
+		auto job = pool.create_job([&runs]() { return ++runs; });
+		EXPECT(pool.run_pending(10s) == 0u);
+		EXPECT(runs == 0);
+		EXPECT(job.get() == 1);
+		EXPECT(runs == 1);
+	};
+
+	TEST_CASE("thread pool : a pool without workers runs a job that waits for another job")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		auto outer = pool.schedule([&pool]() {
+			auto inner = pool.schedule([]() { return 3; });
+			return inner.get() * 2;
+		});
+		EXPECT(outer.get() == 6);
+		EXPECT(pool.get_jobs_count() == 0u);
+	};
+
+	TEST_CASE("thread pool : a pool without workers runs its jobs in wait_all and in wait_for")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		constexpr int job_count = 20;
+		int runs = 0;
+		for(int i = 0; i < job_count; ++i)
+		{
+			pool.schedule([&runs]() { ++runs; });
+		}
+		pool.wait_all();
+		EXPECT(runs == job_count);
+		auto job = pool.schedule([]() { return 5; });
+		EXPECT(job.wait_for(0ms) == std::future_status::ready);
+		EXPECT(job.get() == 5);
+	};
+
+	TEST_CASE("thread pool : run_pending runs the highest priority first and stops when the budget is spent")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		std::vector<std::string> order;
+		pool.schedule(tpp::priority::low(), [&order]() { order.push_back("low"); });
+		pool.schedule(tpp::priority::critical(), [&order]() { order.push_back("critical"); });
+		pool.schedule(tpp::priority::normal(), [&order]() { order.push_back("normal"); });
+		pool.schedule(tpp::priority::high(), [&order]() { order.push_back("high"); });
+		EXPECT(pool.run_pending(10s) == 4u);
+		EXPECT((order == std::vector<std::string>{"critical", "high", "normal", "low"}));
+		for(int i = 0; i < 3; ++i)
+		{
+			pool.schedule([]() { std::this_thread::sleep_for(5ms); });
+		}
+		EXPECT(pool.run_pending(1ms) == 1u);
+		EXPECT(pool.run_pending(10s) == 2u);
+		EXPECT(pool.run_pending(10s) == 0u);
+	};
+
+	TEST_CASE("thread pool : a job run by run_pending is not run again by a wait or a raised priority")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		int runs = 0;
+		auto job = pool.schedule([&runs]() { return ++runs; });
+		job.change_priority(tpp::priority::high());
+		EXPECT(pool.run_pending(10s) == 1u);
+		EXPECT(job.is_ready());
+		EXPECT(job.get() == 1);
+		EXPECT(pool.run_pending(10s) == 0u);
+		EXPECT(runs == 1);
+	};
+
+	TEST_CASE("thread pool : a pool without workers hands a job's exception to the thread that waits for it")
+	{
+		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
+		auto job = pool.schedule([]() -> int { throw std::runtime_error("job failed"); });
+		bool is_caught = false;
+		try
+		{
+			job.get();
+		}
+		catch(const std::runtime_error&)
+		{
+			is_caught = true;
+		}
+		EXPECT(is_caught);
+	};
+}
+
 void run_tests(int iterations)
 {
 	auto now = tpp::clock::now();
@@ -357,6 +475,7 @@ void run_tests(int iterations)
 	run_burst_tests();
 	run_monitoring_tests();
 	run_shared_future_tests();
+	run_inline_tests();
 
 	auto end = tpp::clock::now();
 	auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - now);
