@@ -100,7 +100,7 @@ auto bounce(int depth, tpp::thread::id here, tpp::thread::id there) -> int
 void test_threads_bounce_work_back_and_forth()
 {
     auto worker = tpp::make_thread("reentrancy worker");
-    constexpr int depth = 16;
+    constexpr static int depth = 16;
     EXPECT(bounce(depth, tpp::this_thread::get_id(), worker.get_id()) == depth);
 }
 
@@ -236,14 +236,14 @@ auto bounce_on_main(tpp::thread_pool& pool, tpp::thread::id main_id, int depth) 
 void test_main_and_jobs_bounce_work_back_and_forth(size_t worker_count)
 {
     tpp::thread_pool pool(make_workers(worker_count));
-    constexpr int depth = 12;
+    constexpr static int depth = 12;
     EXPECT(bounce_on_main(pool, tpp::this_thread::get_id(), depth) == depth);
 }
 
 void test_jobs_hand_work_back_while_main_waits_on_all(size_t worker_count)
 {
     // Many jobs need the main thread at once while it waits on each of them in turn.
-    constexpr int job_count = 32;
+    constexpr static int job_count = 32;
     tpp::thread_pool pool(make_workers(worker_count));
     const auto main_id = tpp::this_thread::get_id();
     std::atomic<int> on_main{0};

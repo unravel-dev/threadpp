@@ -20,16 +20,16 @@ namespace on_process_tests
 {
 namespace
 {
-constexpr std::chrono::milliseconds wait_duration{20};
-constexpr std::chrono::milliseconds poll_deadline{2000};
-constexpr int repost_process_calls = 3;
-constexpr int async_value = 42;
-constexpr int promise_value = 7;
+constexpr static std::chrono::milliseconds wait_duration{20};
+constexpr static std::chrono::milliseconds poll_deadline{2000};
+constexpr static int repost_process_calls = 3;
+constexpr static int async_value = 42;
+constexpr static int promise_value = 7;
 // a plain task arrives this late to end a nested process_and_wait
-constexpr std::chrono::milliseconds waker_delay{40};
+constexpr static std::chrono::milliseconds waker_delay{40};
 // that wait has to last at least this long: it did not return on the
 // on-process task it cannot run
-constexpr std::chrono::milliseconds min_nested_wait{20};
+constexpr static std::chrono::milliseconds min_nested_wait{20};
 
 // polls the predicate between std sleeps, which run none of this thread's
 // tasks, until it holds or the deadline passes

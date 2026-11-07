@@ -27,7 +27,7 @@ void expect_count(const char* label, int actual, int expected)
 
 void run_burst_tests()
 {
-	constexpr int job_count = 1000;
+	constexpr static int job_count = 1000;
 	tpp::thread_pool pool({{tpp::priority::category::normal, 4}});
 	std::atomic<int> completed{0};
 	for(int i = 0; i < job_count; ++i)
@@ -174,7 +174,7 @@ void run_monitoring_tests()
 	TEST_CASE("thread pool : wait_all_polling counts the finished jobs")
 	{
 		tpp::thread_pool pool({{tpp::priority::category::normal, 2}});
-		constexpr size_t job_count = 12;
+		constexpr static size_t job_count = 12;
 		held_job held;
 		// Scheduled first and released last: whichever job the wait starts on, the
 		// count has to move while this one still runs.
@@ -217,8 +217,8 @@ void run_shared_future_tests()
 {
 	TEST_CASE("thread pool : a deferred job submitted from many threads through one shared future runs once")
 	{
-		constexpr int thread_count = 16;
-		constexpr int rounds = 200;
+		constexpr static int thread_count = 16;
+		constexpr static int rounds = 200;
 		tpp::thread_pool pool({{tpp::priority::category::normal, 4}});
 		bool is_every_job_run_once = true;
 		bool is_every_job_submitted = true;
@@ -270,8 +270,8 @@ void run_shared_future_tests()
 
 	TEST_CASE("thread pool : many threads reading a ready shared future get its one stored value")
 	{
-		constexpr int thread_count = 16;
-		constexpr int reads = 20000;
+		constexpr static int thread_count = 16;
+		constexpr static int reads = 20000;
 		tpp::thread_pool pool({{tpp::priority::category::normal, 2}});
 		auto job = pool.schedule([]() { return std::string("a value longer than the small string buffer"); }).share();
 		job.wait();
@@ -354,7 +354,7 @@ void run_inline_tests()
 	TEST_CASE("thread pool : a pool without workers runs its jobs in wait_all and in wait_for")
 	{
 		tpp::thread_pool pool({{tpp::priority::category::normal, 0}});
-		constexpr int job_count = 20;
+		constexpr static int job_count = 20;
 		int runs = 0;
 		for(int i = 0; i < job_count; ++i)
 		{

@@ -17,7 +17,7 @@ namespace benchmark_tests
 {
 namespace
 {
-constexpr int repeat_count = 5;
+constexpr static int repeat_count = 5;
 
 /// The best of a few runs, in milliseconds.
 auto measure(const std::function<void()>& body) -> double
@@ -48,7 +48,7 @@ auto make_workers(size_t worker_count) -> std::map<tpp::priority::category, size
 
 void bench_burst(size_t worker_count)
 {
-    constexpr int job_count = 100000;
+    constexpr static int job_count = 100000;
     tpp::thread_pool pool(make_workers(worker_count));
     std::atomic<int> runs{0};
     const auto milliseconds = measure(
@@ -73,7 +73,7 @@ void bench_burst(size_t worker_count)
 
 void bench_round_trip(size_t worker_count)
 {
-    constexpr int trip_count = 20000;
+    constexpr static int trip_count = 20000;
     tpp::thread_pool pool(make_workers(worker_count));
     const auto milliseconds = measure(
         [&]()
@@ -93,8 +93,8 @@ void bench_round_trip(size_t worker_count)
 
 void bench_fork_join(size_t worker_count)
 {
-    constexpr int round_count = 2000;
-    constexpr int fanout = 16;
+    constexpr static int round_count = 2000;
+    constexpr static int fanout = 16;
     tpp::thread_pool pool(make_workers(worker_count));
     const auto milliseconds = measure(
         [&]()
@@ -129,7 +129,7 @@ void bench_fork_join(size_t worker_count)
 
 void bench_mailbox()
 {
-    constexpr int task_count = 200000;
+    constexpr static int task_count = 200000;
     auto worker = tpp::make_thread("bench mailbox");
     std::atomic<int> runs{0};
     const auto milliseconds = measure(

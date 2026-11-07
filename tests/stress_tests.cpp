@@ -50,9 +50,9 @@ auto make_group(sequence& random) -> tpp::priority::group
 
 void test_many_producers(size_t worker_count)
 {
-    constexpr int producer_count = 8;
-    constexpr int jobs_per_producer = 300;
-    constexpr int child_every = 7;
+    constexpr static int producer_count = 8;
+    constexpr static int jobs_per_producer = 300;
+    constexpr static int child_every = 7;
     tpp::thread_pool pool({{tpp::priority::category::low, worker_count}});
     std::atomic<long long> total{0};
     std::vector<std::thread> producers;
@@ -117,7 +117,7 @@ void test_many_producers(size_t worker_count)
 
 void test_shared_job_many_waiters(size_t worker_count)
 {
-    constexpr int waiter_count = 8;
+    constexpr static int waiter_count = 8;
     tpp::thread_pool pool({{tpp::priority::category::low, worker_count}});
     std::atomic<int> runs{0};
     auto job = pool.schedule(
@@ -158,7 +158,7 @@ void test_shared_job_many_waiters(size_t worker_count)
 
 void test_mixed_graph(size_t worker_count)
 {
-    constexpr int job_count = 200;
+    constexpr static int job_count = 200;
     tpp::thread_pool pool({{tpp::priority::category::low, worker_count}});
     const auto main_id = tpp::this_thread::get_id();
     sequence random(static_cast<std::uint32_t>(worker_count + 11));
@@ -227,8 +227,8 @@ void test_mixed_graph(size_t worker_count)
 
 void test_pool_churn(size_t worker_count)
 {
-    constexpr int pool_count = 30;
-    constexpr int jobs_per_pool = 20;
+    constexpr static int pool_count = 30;
+    constexpr static int jobs_per_pool = 20;
     std::atomic<int> runs{0};
     std::vector<tpp::job_future<void>> orphans;
     for(int p = 0; p < pool_count; ++p)
@@ -270,8 +270,8 @@ void test_pool_churn(size_t worker_count)
 
 void test_concurrent_priority_changes(size_t worker_count)
 {
-    constexpr int job_count = 400;
-    constexpr int changer_count = 4;
+    constexpr static int job_count = 400;
+    constexpr static int changer_count = 4;
     tpp::thread_pool pool({{tpp::priority::category::low, worker_count}});
     std::vector<tpp::job_shared_future<int>> jobs;
     for(int i = 0; i < job_count; ++i)

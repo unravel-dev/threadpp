@@ -37,8 +37,8 @@ auto start_registered(std::function<void()> body) -> std::thread
 
 void test_mutex_contention()
 {
-    constexpr int thread_count = 4;
-    constexpr int lock_count = 2000;
+    constexpr static int thread_count = 4;
+    constexpr static int lock_count = 2000;
     tpp::mutex mutex;
     int counter = 0;
     std::vector<std::thread> threads;
@@ -91,7 +91,7 @@ void test_mutex_ownership()
 
 void test_producer_consumer()
 {
-    constexpr int item_count = 2000;
+    constexpr static int item_count = 2000;
     std::mutex mutex;
     tpp::condition_variable items_event;
     std::vector<int> items;
@@ -129,7 +129,7 @@ void test_producer_consumer()
 
 void test_notify_all_wakes_every_waiter(bool is_registered)
 {
-    constexpr int waiter_count = 4;
+    constexpr static int waiter_count = 4;
     std::mutex mutex;
     tpp::condition_variable ready_event;
     bool is_ready = false;
@@ -362,7 +362,7 @@ void test_mailbox_order_and_dispatch()
 {
     auto worker = tpp::make_thread("mailbox order");
     test_support::order_log order;
-    constexpr int task_count = 100;
+    constexpr static int task_count = 100;
     for(int i = 0; i < task_count; ++i)
     {
         tpp::invoke(worker.get_id(),

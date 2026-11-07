@@ -178,7 +178,7 @@ void test_when_all_of_jobs(size_t worker_count)
     EXPECT(std::get<0>(results).get() + std::get<1>(results).get() == 3);
 
     std::vector<tpp::future<int>> futures;
-    constexpr int job_count = 16;
+    constexpr static int job_count = 16;
     for(int i = 0; i < job_count; ++i)
     {
         futures.emplace_back(pool.schedule(
@@ -341,10 +341,10 @@ auto run_fork_join(tpp::thread_pool& pool, int depth, int fanout) -> int
 void test_nested_waits(size_t worker_count)
 {
     tpp::thread_pool pool(make_workers(worker_count));
-    constexpr int depth = 24;
+    constexpr static int depth = 24;
     EXPECT(run_nested(pool, depth) == depth);
-    constexpr int tree_depth = 4;
-    constexpr int fanout = 4;
+    constexpr static int tree_depth = 4;
+    constexpr static int fanout = 4;
     EXPECT(run_fork_join(pool, tree_depth, fanout) == 256);
 }
 
@@ -444,7 +444,7 @@ void test_idle_worker_runs_waited_job(size_t worker_count)
 {
     tpp::thread_pool pool(make_workers(worker_count));
     const auto main_thread = std::this_thread::get_id();
-    constexpr int rounds = 10;
+    constexpr static int rounds = 10;
     int on_main = 0;
     for(int i = 0; i < rounds; ++i)
     {
@@ -519,7 +519,7 @@ void test_timed_wait_runs_job_without_workers()
 void test_wait_all_polling(size_t worker_count)
 {
     tpp::thread_pool pool(make_workers(worker_count));
-    constexpr int job_count = 12;
+    constexpr static int job_count = 12;
     std::atomic<int> runs{0};
     for(int i = 0; i < job_count; ++i)
     {
