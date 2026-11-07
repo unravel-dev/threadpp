@@ -2,6 +2,7 @@
 ![windows](https://github.com/unravel-dev/threadpp/actions/workflows/windows.yml/badge.svg)
 ![linux](https://github.com/unravel-dev/threadpp/actions/workflows/linux.yml/badge.svg)
 ![macos](https://github.com/unravel-dev/threadpp/actions/workflows/macos.yml/badge.svg)
+![sanitizers](https://github.com/unravel-dev/threadpp/actions/workflows/sanitizers.yml/badge.svg)
 
 C++14 library providing easy interface for thread communication in a single process.
 It has no dependencies except the standard library.
@@ -18,6 +19,55 @@ made with make_thread do; a loop on this_thread::wait() never does.
 It provides abstractions like condition_variable, promise, future, shared_future, future continuations, async
 which are standard conforming. 
 It provides a very easy interface to attach any std thread to it and start invoking into it.
+
+## Scheduling: the same behavior with any number of threads
+
+A thread_pool may have any number of workers, none included (a program that cannot start threads, such as a
+browser build). Every blocking call - future wait/get/wait_for, thread_pool::wait/wait_all, sleep_for,
+condition_variable, mutex - runs one loop, so a program behaves the same whatever the count:
+
+- Liveness: a wait returns once queued work can produce its result. A wait follows a future to the jobs that
+  produce it - its own job, a continuation's source, a when_all/when_any's inputs - and runs one itself when no
+  worker is free to.
+- Placement: a mailbox task runs only on its thread. A pool job runs on a worker, or on a thread that waits for
+  it (or for something made from it) when no worker is free. A timed wait of a thread outside a pool with
+  workers runs none of its jobs, so it returns near its deadline.
+- Order: jobs start highest category first, then highest priority, then first scheduled first. A waited job may
+  start ahead of that order.
+- Re-entrancy: any blocking call may run the waiting thread's own tasks and the jobs its result depends on; never
+  its on-process tasks. A worker, or the thread that hosts a pool without workers (the one that created it),
+  waiting for something whose producer is unknown (a promise, a condition variable, a sleep) also runs other
+  queued jobs when nothing else would: those its own job scheduled first, then any (the host says so in the log
+  once).
+- Threads need no registration to wait; registration is what gives a thread a mailbox.
+
+Two things only threads can give: a job that needs a job suspended further down the same stack cannot finish
+on one thread (a wait for a job running further up the same thread is reported in the log), and a lock held
+across a wait may be wanted by a job the wait runs. Never hold a lock across a wait.
+
+async(f) and then(f) without a thread id start a thread each; set_detached_executor hands them to something else
+instead, e.g. a pool without workers.
+
+## Tests and sanitizers
+
+```
+threadpp_test [--iterations N] [--filter TEXT] [--timeout-scale X] [--bench]
+```
+
+The scheduling, re-entrancy, sync and stress cases run at 0, 1, 2 and 8 workers under a watchdog that fails the run with the
+case's name when a wait never returns. THREADPP_TEST_ITERATIONS and THREADPP_TEST_TIMEOUT_SCALE set the defaults.
+With a filter only the cases whose name contains it run. --bench prints timings to compare builds instead.
+
+THREADPP_SANITIZE builds the library and tests with sanitizers: `thread` (ThreadSanitizer, Linux and macOS
+clang/gcc) or `address;undefined`. The presets do it:
+
+```
+cmake --preset linux-clang-tsan && cmake --build --preset linux-clang-tsan && ctest --preset linux-clang-tsan
+cmake --preset linux-clang-asan && cmake --build --preset linux-clang-asan && ctest --preset linux-clang-asan
+```
+
+macos-arm64-tsan does the same on macOS. On Ubuntu 24.04 run `sudo sysctl vm.mmap_rnd_bits=28` first, as the
+sanitizers workflow does.
 
 ```c++
 std::thread make_std_thread()

@@ -1,0 +1,30 @@
+name: sanitizers
+
+on: [push, pull_request]
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # ThreadSanitizer for races, AddressSanitizer with UndefinedBehaviorSanitizer for lifetimes
+        preset: [linux-clang-tsan, linux-clang-asan]
+    steps:
+    - name: Setup
+      run: |
+        sudo apt-get update -o Acquire::Retries=10
+        sudo apt-get install -o Acquire::Retries=10 -y cmake ninja-build clang
+        # The sanitizers' shadow memory does not fit the kernel's default mmap randomization
+        sudo sysctl vm.mmap_rnd_bits=28
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+    - name: Build
+      run: |
+        cmake --preset ${{matrix.preset}}
+        cmake --build --preset ${{matrix.preset}}
+    - name: Test
+      run: |
+        ctest --preset ${{matrix.preset}}

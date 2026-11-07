@@ -141,6 +141,34 @@
             }
         },
         {
+            "name": "linux-clang-tsan",
+            "inherits": "linux-base",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "THREADPP_SANITIZE": "thread"
+            }
+        },
+        {
+            "name": "linux-clang-asan",
+            "inherits": "linux-base",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "THREADPP_SANITIZE": "address;undefined"
+            }
+        },
+        {
+            "name": "macos-arm64-tsan",
+            "inherits": "macos-arm64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "THREADPP_SANITIZE": "thread"
+            }
+        },
+        {
             "name": "macos-base",
             "hidden": true,
             "inherits": "ninja-base",
@@ -438,6 +466,18 @@
             "configurePreset": "linux-gcc-14"
         },
         {
+            "name": "linux-clang-tsan",
+            "configurePreset": "linux-clang-tsan"
+        },
+        {
+            "name": "linux-clang-asan",
+            "configurePreset": "linux-clang-asan"
+        },
+        {
+            "name": "macos-arm64-tsan",
+            "configurePreset": "macos-arm64-tsan"
+        },
+        {
             "name": "macos-arm64-debug",
             "configuration": "Debug",
             "configurePreset": "macos-arm64"
@@ -542,6 +582,34 @@
                 "verbosity": "verbose"
             },
             "configuration": "Release"
+        },
+        {
+            "name": "sanitizer-test-base",
+            "hidden": true,
+            "output": {
+                "verbosity": "verbose"
+            },
+            "environment": {
+                "TSAN_OPTIONS": "halt_on_error=1 second_deadlock_stack=1",
+                "ASAN_OPTIONS": "detect_leaks=1 halt_on_error=1",
+                "UBSAN_OPTIONS": "print_stacktrace=1 halt_on_error=1",
+                "THREADPP_TEST_TIMEOUT_SCALE": "10"
+            }
+        },
+        {
+            "name": "linux-clang-tsan",
+            "inherits": "sanitizer-test-base",
+            "configurePreset": "linux-clang-tsan"
+        },
+        {
+            "name": "linux-clang-asan",
+            "inherits": "sanitizer-test-base",
+            "configurePreset": "linux-clang-asan"
+        },
+        {
+            "name": "macos-arm64-tsan",
+            "inherits": "sanitizer-test-base",
+            "configurePreset": "macos-arm64-tsan"
         },
         {
             "name": "linux-clang-12-release",
