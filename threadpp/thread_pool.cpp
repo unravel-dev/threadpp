@@ -1,10 +1,12 @@
 #include "thread_pool.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -36,6 +38,8 @@ class thread_pool::impl
         std::string name;
         std::string detail;
         std::chrono::steady_clock::time_point start;
+        /// The thread that runs it: a worker, or one that waited for it in a pool without workers.
+        std::thread::id thread;
     };
 
     friend bool operator<(const job_handle& lhs, const job_handle& rhs)
@@ -547,8 +551,13 @@ private:
         {
             std::lock_guard<std::mutex> lock(guard_);
             auto it = jobs_.find(id);
-            if(it == jobs_.end() || !it->second.callable)
+            if(it == jobs_.end())
             {
+                return;
+            }
+            if(!it->second.callable)
+            {
+                report_wait_on_own_stack(id);
                 return;
             }
             take_locked(it->second, user_job, id);
@@ -557,12 +566,27 @@ private:
         finish_job(id);
     }
 
+    /// A job this thread runs further up its stack cannot end while the thread waits for it, and without
+    /// workers nothing else runs it: the wait that follows never returns, so it is reported. Under the guard.
+    void report_wait_on_own_stack(job_id id) const
+    {
+        const auto running = running_.find(id);
+        if(running == running_.end() || running->second.thread != std::this_thread::get_id())
+        {
+            return;
+        }
+        std::fprintf(stderr,
+                     "threadpp: a wait for job '%s' (%s), which runs further up the same thread, never returns.\n",
+                     running->second.name.c_str(),
+                     running->second.detail.c_str());
+    }
+
     /// Moves the job's callable out to run on the caller and records the job as running. Under the guard.
     void take_locked(job_info& job, task& user_job, job_id& id)
     {
         id = job.handle.id;
         user_job = std::move(job.callable);
-        running_[id] = {job.handle.name, job.detail, std::chrono::steady_clock::now()};
+        running_[id] = {job.handle.name, job.detail, std::chrono::steady_clock::now(), std::this_thread::get_id()};
     }
 
     void check_jobs(priority::category level)
