@@ -754,6 +754,32 @@ inline void launch_on_process(thread::id id, task& func)
         invoke_packaged_task_on_process(id, func);
     }
 }
+
+// work that asks for no thread: the detached executor's (set_detached_executor),
+// or a thread of its own that runs it and ends
+inline void launch_detached(task& func)
+{
+    if(run_detached(func))
+    {
+        return;
+    }
+    thread detached_thread(
+        []()
+        {
+            this_thread::register_this_thread();
+            this_thread::wait();
+            this_thread::unregister_this_thread();
+        });
+    detached_thread.detach();
+    invoke_packaged_task(detached_thread.get_id(), func);
+}
+
+// a continuation's result waits on its source: a wait on it runs the source's job
+template<typename R, typename State>
+void link_to_source(const future<R>& result, const State& source)
+{
+    result._internal_get_state()->add_antecedent(source);
+}
 } // namespace detail
 
 template<typename F, typename... Args>
@@ -775,17 +801,11 @@ auto async(thread::id id, F&& f, Args&&... args) -> future<async_ret_type<F, Arg
 }
 
 template<typename F, typename... Args>
-auto async(std::launch policy, F&& f, Args&&... args) -> future<async_ret_type<F, Args...>>
+auto async(std::launch /*policy*/, F&& f, Args&&... args) -> future<async_ret_type<F, Args...>>
 {
-    thread detached_thread(
-        []()
-        {
-            this_thread::register_this_thread();
-            this_thread::wait();
-            this_thread::unregister_this_thread();
-        });
-    detached_thread.detach();
-    return async(detached_thread.get_id(), policy, std::forward<F>(f), std::forward<Args>(args)...);
+    auto package = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
+    detail::launch_detached(package.callable);
+    return std::move(package.callable_future);
 }
 
 template<typename F, typename... Args>
@@ -825,6 +845,7 @@ auto future<T>::then_launched(Launch launch, F&& f) -> future<then_ret_type<F, f
     auto& future = package.callable_future;
     auto& task = package.callable;
 
+    detail::link_to_source(future, state);
     state->set_continuation(
         [launch, task = std::move(task)]() mutable
         {
@@ -867,17 +888,14 @@ auto future<T>::then(thread::id id, F&& f) -> future<then_ret_type<F, future<T>>
 
 template<typename T>
 template<typename F>
-auto future<T>::then(std::launch policy, F&& f) -> future<then_ret_type<F, future<T>>>
+auto future<T>::then(std::launch /*policy*/, F&& f) -> future<then_ret_type<F, future<T>>>
 {
-    thread detached_thread(
-        []()
+    return then_launched(
+        [](task& work)
         {
-            this_thread::register_this_thread();
-            this_thread::wait();
-            this_thread::unregister_this_thread();
-        });
-    detached_thread.detach();
-    return then(detached_thread.get_id(), policy, std::forward<F>(f));
+            detail::launch_detached(work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename T>
@@ -907,6 +925,7 @@ auto shared_future<T>::then_launched(Launch launch, F&& f) const -> future<then_
     auto& future = package.callable_future;
     auto& task = package.callable;
 
+    detail::link_to_source(future, state);
     state->set_continuation(
         [launch, task = std::move(task)]() mutable
         {
@@ -950,17 +969,14 @@ auto shared_future<T>::then(thread::id id, F&& f) const -> future<then_ret_type<
 
 template<typename T>
 template<typename F>
-auto shared_future<T>::then(std::launch policy, F&& f) const -> future<then_ret_type<F, shared_future<T>>>
+auto shared_future<T>::then(std::launch /*policy*/, F&& f) const -> future<then_ret_type<F, shared_future<T>>>
 {
-    thread detached_thread(
-        []()
+    return then_launched(
+        [](task& work)
         {
-            this_thread::register_this_thread();
-            this_thread::wait();
-            this_thread::unregister_this_thread();
-        });
-    detached_thread.detach();
-    return then(detached_thread.get_id(), policy, std::forward<F>(f));
+            detail::launch_detached(work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename T>
@@ -989,6 +1005,7 @@ auto future<void>::then_launched(Launch launch, F&& f) -> future<then_ret_type<F
     auto& future = package.callable_future;
     auto& task = package.callable;
 
+    detail::link_to_source(future, state);
     state->set_continuation(
         [launch, task = std::move(task)]() mutable
         {
@@ -1027,17 +1044,14 @@ auto future<void>::then(thread::id id, F&& f) -> future<then_ret_type<F, future<
 }
 
 template<typename F>
-auto future<void>::then(std::launch policy, F&& f) -> future<then_ret_type<F, future<void>>>
+auto future<void>::then(std::launch /*policy*/, F&& f) -> future<then_ret_type<F, future<void>>>
 {
-    thread detached_thread(
-        []()
+    return then_launched(
+        [](task& work)
         {
-            this_thread::register_this_thread();
-            this_thread::wait();
-            this_thread::unregister_this_thread();
-        });
-    detached_thread.detach();
-    return then(detached_thread.get_id(), policy, std::forward<F>(f));
+            detail::launch_detached(work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename F>
@@ -1065,6 +1079,7 @@ auto shared_future<void>::then_launched(Launch launch, F&& f) const -> future<th
     auto& future = package.callable_future;
     auto& task = package.callable;
 
+    detail::link_to_source(future, state);
     state->set_continuation(
         [launch, task = std::move(task)]() mutable
         {
@@ -1104,17 +1119,14 @@ auto shared_future<void>::then(thread::id id, F&& f) const -> future<then_ret_ty
 }
 
 template<typename F>
-auto shared_future<void>::then(std::launch policy, F&& f) const -> future<then_ret_type<F, shared_future<void>>>
+auto shared_future<void>::then(std::launch /*policy*/, F&& f) const -> future<then_ret_type<F, shared_future<void>>>
 {
-    thread detached_thread(
-        []()
+    return then_launched(
+        [](task& work)
         {
-            this_thread::register_this_thread();
-            this_thread::wait();
-            this_thread::unregister_this_thread();
-        });
-    detached_thread.detach();
-    return then(detached_thread.get_id(), policy, std::forward<F>(f));
+            detail::launch_detached(work);
+        },
+        std::forward<F>(f));
 }
 
 template<typename F>

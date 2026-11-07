@@ -150,6 +150,15 @@ auto dispatch_on_process(thread::id id, F&& f, Args&&... args) -> bool;
 void notify(thread::id id);
 
 //-----------------------------------------------------------------------------
+/// What runs the work that asks for a thread of its own: async and then without
+/// a thread id. Without one, each such call starts a detached thread; a program
+/// that runs without threads sets one that queues the work instead (a job pool).
+/// An empty executor restores the threads.
+//-----------------------------------------------------------------------------
+using detached_executor = std::function<void(task)>;
+void set_detached_executor(detached_executor executor);
+
+//-----------------------------------------------------------------------------
 /// Wakes up and notifies a thread that it should start preparing for exit.
 /// It does not join the thread.
 //-----------------------------------------------------------------------------
@@ -284,14 +293,15 @@ auto wait_until(const std::chrono::time_point<Clock, Duration>& abs_time) -> std
 
 //-----------------------------------------------------------------------------
 /// Sleeps for the specified duration and allow tasks to be processed during
-/// that time.
+/// that time. A thread that hosts a pool without workers runs the pool's queued
+/// jobs meanwhile, as the pool's workers would.
 //-----------------------------------------------------------------------------
 template<typename Rep, typename Period>
 void sleep_for(const std::chrono::duration<Rep, Period>& rtime);
 
 //-----------------------------------------------------------------------------
 /// Sleeps until the specified time has been reached and allow tasks to
-/// be processed during that time.
+/// be processed during that time, as sleep_for does.
 //-----------------------------------------------------------------------------
 template<typename Clock, typename Duration>
 void sleep_until(const std::chrono::time_point<Clock, Duration>& abs_time);
@@ -333,6 +343,15 @@ auto invoke_packaged_task_on_process(thread::id id, task& f) -> bool;
 // true when the calling thread is the one passed and is running an
 // on-process task at its own level (not a task some blocking call of it ran)
 auto is_on_process_point(thread::id id) -> bool;
+// hands the work to the detached executor and empties it; false, leaving it, when
+// none is set
+auto run_detached(task& work) -> bool;
+// a registered thread that runs `body`, which loops until notified for exit,
+// instead of make_thread's loop
+auto make_thread_running(const std::string& name, task body) -> thread;
+// the log callbacks of init_data
+void log_info(const std::string& message);
+void log_error(const std::string& message);
 } // namespace detail
 
 // apply perfect forwarding to the callable and arguments
@@ -391,6 +410,7 @@ namespace detail
 {
 auto wait_for(const std::chrono::microseconds& rtime) -> std::cv_status;
 void process_for(const std::chrono::microseconds& rtime);
+void sleep_until(clock::time_point deadline);
 } // namespace detail
 
 template<typename Rep, typename Period>
@@ -426,22 +446,7 @@ inline void sleep_for(const std::chrono::duration<Rep, Period>& rtime)
     {
         return;
     }
-
-    auto now = clock::now();
-    auto end_time = now + rtime;
-
-    while(now < end_time)
-    {
-        if(notified_for_exit())
-        {
-            return;
-        }
-        auto time_left = end_time - now;
-
-        wait_for(time_left);
-
-        now = clock::now();
-    }
+    detail::sleep_until(clock::now() + std::chrono::duration_cast<clock::duration>(rtime));
 }
 
 template<typename Clock, typename Duration>

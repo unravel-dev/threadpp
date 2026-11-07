@@ -95,8 +95,8 @@ struct job_future_storage
     }
 
 private:
-    std::weak_ptr<int> sentinel_{};
-    thread_pool* owner_{};
+    /// The pool's core, which outlives the pool while a wait uses it; expired once the pool is gone.
+    std::weak_ptr<detail::job_source> source_{};
     /// Whether the pool took a deferred job; null for a job scheduled at once. One flag for every copy
     /// of the future, so a copy taken before another one submitted sees the submission. Atomic
     /// because submit() is const and copies are read, and submitted, from any thread.
@@ -239,16 +239,22 @@ public:
     ///					       {tpp::priority::category::high, 1},
     ///					       {tpp::priority::category::critical, 1}});
     ///
+    /// Jobs start highest category first, then highest priority, then first
+    /// scheduled first. A thread that waits for a job's future, or for a future made
+    /// from one (then, when_all, when_any), runs the job itself when no worker is
+    /// free to: always in a pool without workers, and in an untimed wait when every
+    /// worker is busy. A timed wait runs no job while the pool has workers.
+    ///
     /// A pool with no workers at all, for a program that has no threads to give it,
-    /// runs a queued job on the thread that waits for it (any wait on the job's
-    /// future, wait() or wait_all()) and in run_pending(), which such a program calls
-    /// regularly for the jobs nobody waits for.
+    /// is hosted by the thread that creates it: its waits and sleeps also run queued
+    /// jobs when nothing they depend on is queued, and run_pending(), which such a
+    /// program calls regularly, runs the jobs nobody waits for.
     //-----------------------------------------------------------------------------
     thread_pool(const std::map<priority::category, size_t>& workers_per_priority_level,
                 tasks_capacity_config config = {});
     thread_pool();
-    thread_pool(thread_pool&&) = default;
-    auto operator=(thread_pool&&) -> thread_pool& = default;
+    thread_pool(thread_pool&& other) noexcept;
+    auto operator=(thread_pool&& other) noexcept -> thread_pool&;
     ~thread_pool();
 
     thread_pool(const thread_pool&) = delete;
@@ -379,28 +385,31 @@ public:
     auto get_workers_count() const -> size_t;
 
 private:
-    auto add_job(task& job, priority::group group, const job_desc& desc, bool queue = true) -> job_id;
+    friend struct job_future_storage;
 
-    /// The runner a waiter on job @a id calls to run it itself; empty when the pool has workers.
-    auto make_inline_runner(job_id id) const -> task;
+    /// Adds the job and links the user's future to it, so a wait on that future can run it.
+    auto add_job(task& job, priority::group group, const job_desc& desc, detail::state_base& user_state, bool queue)
+        -> job_id;
 
     template<typename T>
-    void attach_inline_runner(job_future<T>& fut) const;
+    void attach_job(job_future<T>& fut, task& job, priority::group group, const job_desc& desc, bool queue);
+
+    auto get_job_source() const -> std::weak_ptr<detail::job_source>;
 
     class impl;
-    /// pimpl idiom
-    std::unique_ptr<impl> impl_;
-
-    std::shared_ptr<int> sentinel_ = std::make_shared<int>();
+    /// pimpl idiom; shared with the waits that run its jobs, which hold it weakly
+    std::shared_ptr<impl> impl_;
 };
 
 template<typename T>
-void thread_pool::attach_inline_runner(job_future<T>& fut) const
+void thread_pool::attach_job(job_future<T>& fut, task& job, priority::group group, const job_desc& desc, bool queue)
 {
-    if(auto runner = make_inline_runner(fut.id))
+    if(!queue)
     {
-        fut._internal_get_state()->set_inline_runner(std::move(runner));
+        fut.submitted_ = std::make_shared<std::atomic<bool>>(false);
     }
+    fut.source_ = get_job_source();
+    fut.id = add_job(job, group, desc, *fut._internal_get_state(), queue);
 }
 
 template<typename F, typename... Args>
@@ -408,10 +417,7 @@ auto thread_pool::schedule(const job_desc& desc, priority::group group, F&& f, A
 {
     auto packaged_task = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
     job_future<async_ret_type<F, Args...>> fut(std::move(packaged_task.callable_future));
-    fut.id = add_job(packaged_task.callable, group, desc);
-    fut.sentinel_ = sentinel_;
-    fut.owner_ = this;
-    attach_inline_runner(fut);
+    attach_job(fut, packaged_task.callable, group, desc, true);
     return fut;
 }
 
@@ -450,11 +456,7 @@ auto thread_pool::create_job(const job_desc& desc, priority::group group, F&& f,
 {
     auto packaged_task = detail::package_future_task(std::forward<F>(f), std::forward<Args>(args)...);
     job_future<async_ret_type<F, Args...>> fut(std::move(packaged_task.callable_future));
-    fut.id = add_job(packaged_task.callable, group, desc, false);
-    fut.sentinel_ = sentinel_;
-    fut.owner_ = this;
-    fut.submitted_ = std::make_shared<std::atomic<bool>>(false);
-    attach_inline_runner(fut);
+    attach_job(fut, packaged_task.callable, group, desc, false);
     return fut;
 }
 

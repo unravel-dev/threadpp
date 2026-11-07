@@ -1,7 +1,13 @@
 #pragma once
-#include "../condition_variable.hpp"
+#include "scheduler.h"
+
+#include <algorithm>
+#include <atomic>
 #include <future>
+#include <memory>
+#include <mutex>
 #include <vector>
+
 namespace tpp
 {
 
@@ -15,22 +21,32 @@ enum class value_status : unsigned
     error
 };
 
-template<typename T>
-struct basic_state
+//-----------------------------------------------------------------------------
+/// What every future's shared state holds, whatever its value type: whether it
+/// is ready, the continuations to run then, the threads blocked on it, and links
+/// to the work that produces it - its pool job, and the states it is made from
+/// (a continuation's source, a when_all's inputs) - which a waiting thread may run
+/// itself (scheduler.h).
+//-----------------------------------------------------------------------------
+struct state_base : wait_target
 {
     using callback_container = std::vector<task>;
 
-    condition_variable cv;
     mutable std::mutex guard;
     callback_container callbacks;
-    /// Runs the job that sets this state on the thread that waits for it. Only a thread pool without
-    /// workers sets one, since no other thread would ever run the job; cleared once the state is ready.
-    task inline_runner;
+    std::vector<parker_ptr> waiters;
+    job_link job;
+    std::vector<std::weak_ptr<state_base>> antecedents;
 
     std::exception_ptr exception;
 
     std::atomic<value_status> status = {value_status::not_set};
     std::atomic_flag retrieved = ATOMIC_FLAG_INIT;
+
+    state_base() = default;
+    state_base(const state_base&) = delete;
+    auto operator=(const state_base&) -> state_base& = delete;
+    ~state_base() = default;
 
     bool ready() const
     {
@@ -54,18 +70,29 @@ struct basic_state
         set_ready(lock, value_status::error);
     }
 
+    //-----------------------------------------------------------------------------
+    /// Makes the state ready, wakes the threads blocked on it and runs its
+    /// continuations, on the calling thread, after the lock is released.
+    //-----------------------------------------------------------------------------
     void set_ready(std::unique_lock<std::mutex>& lock, value_status s)
     {
         callback_container continuations;
+        std::vector<parker_ptr> parked;
         {
             status = s;
             continuations = std::move(callbacks);
             callbacks.clear();
-            inline_runner = nullptr;
-            cv.notify_all();
+            parked = std::move(waiters);
+            waiters.clear();
+            job = {};
+            antecedents.clear();
         }
 
         lock.unlock();
+        for(const auto& waiter : parked)
+        {
+            waiter->unpark();
+        }
         for(const auto& continuation : continuations)
         {
             if(continuation)
@@ -92,32 +119,100 @@ struct basic_state
         }
     }
 
-    void set_inline_runner(task runner)
+    //-----------------------------------------------------------------------------
+    /// The pool job that sets this state.
+    //-----------------------------------------------------------------------------
+    void set_job(job_link link)
     {
         std::lock_guard<std::mutex> lock(guard);
         if(!ready())
         {
-            inline_runner = std::move(runner);
+            job = std::move(link);
         }
     }
 
-    /// Runs the inline runner on the calling thread when the state has one and is not ready. A runner
-    /// that finds its job already taken (run by another waiter) returns, and the caller waits as usual.
-    void run_inline() const
+    //-----------------------------------------------------------------------------
+    /// A state this one is made from: waiting for this one runs its producers too.
+    //-----------------------------------------------------------------------------
+    void add_antecedent(const std::shared_ptr<state_base>& state)
     {
-        if(ready())
+        std::lock_guard<std::mutex> lock(guard);
+        if(!ready() && state)
         {
-            return;
+            antecedents.emplace_back(state);
         }
-        task runner;
+    }
+
+    auto is_ready() const -> bool override
+    {
+        return ready();
+    }
+
+    void add_waiter(const parker_ptr& waiter) override
+    {
         {
             std::lock_guard<std::mutex> lock(guard);
-            runner = inline_runner;
+            if(!ready())
+            {
+                waiters.push_back(waiter);
+                return;
+            }
         }
-        if(runner)
+        // Ready meanwhile: the waiter's next check sees it.
+        waiter->unpark();
+    }
+
+    void remove_waiter(const parker_ptr& waiter) override
+    {
+        std::lock_guard<std::mutex> lock(guard);
+        auto it = std::find(waiters.begin(), waiters.end(), waiter);
+        if(it != waiters.end())
         {
-            runner();
+            waiters.erase(it);
         }
+    }
+
+    void collect_jobs(std::vector<job_link>& jobs, std::size_t depth) const override
+    {
+        job_link own;
+        std::vector<std::weak_ptr<state_base>> sources;
+        {
+            std::lock_guard<std::mutex> lock(guard);
+            if(ready())
+            {
+                return;
+            }
+            own = job;
+            if(depth > 0)
+            {
+                sources = antecedents;
+            }
+        }
+        if(own.id != 0)
+        {
+            jobs.push_back(own);
+        }
+        for(const auto& weak_source : sources)
+        {
+            if(auto source = weak_source.lock())
+            {
+                source->collect_jobs(jobs, depth - 1);
+            }
+        }
+    }
+
+    auto describe() const -> std::string override
+    {
+        job_link own;
+        {
+            std::lock_guard<std::mutex> lock(guard);
+            own = job;
+        }
+        if(auto source = own.source.lock())
+        {
+            return source->describe_job(own.id);
+        }
+        return "a future";
     }
 
     void wait()
@@ -127,38 +222,29 @@ struct basic_state
         {
             return;
         }
-        run_inline();
-        std::unique_lock<std::mutex> lock(guard);
-        while(!ready())
-        {
-            if(this_thread::notified_for_exit())
-            {
-                break;
-            }
-            cv.wait(lock);
-        }
+        wait_for_target(*this, false, clock::time_point::max());
     }
 
     template<typename Rep, typename Per>
-    auto wait_for(const std::chrono::duration<Rep, Per>& timeout_duration) const -> std::future_status
+    auto wait_for(const std::chrono::duration<Rep, Per>& timeout_duration) -> std::future_status
     {
-        run_inline();
-        std::unique_lock<std::mutex> lock(guard);
-
-        while(!ready())
+        if(ready())
         {
-            if(this_thread::notified_for_exit())
-            {
-                return std::future_status::deferred;
-            }
-
-            if(cv.wait_for(lock, timeout_duration) == std::cv_status::timeout)
-            {
-                return std::future_status::timeout;
-            }
+            return std::future_status::ready;
         }
-
-        return std::future_status::ready;
+        const auto now = clock::now();
+        const auto duration = std::chrono::duration_cast<clock::duration>(timeout_duration);
+        const auto deadline = duration >= clock::time_point::max() - now ? clock::time_point::max() : now + duration;
+        switch(wait_for_target(*this, true, deadline))
+        {
+            case wait_status::ready:
+                return std::future_status::ready;
+            case wait_status::exit:
+                return std::future_status::deferred;
+            case wait_status::timeout:
+            default:
+                return ready() ? std::future_status::ready : std::future_status::timeout;
+        }
     }
 
     void rethrow_any_exception() const
@@ -171,7 +257,12 @@ struct basic_state
 };
 
 template<typename T>
-struct future_state : public basic_state<T>
+struct basic_state : state_base
+{
+};
+
+template<typename T>
+struct future_state final : public basic_state<T>
 {
     std::shared_ptr<T> value;
 
@@ -215,7 +306,7 @@ struct future_state : public basic_state<T>
 };
 
 template<>
-struct future_state<void> : public basic_state<void>
+struct future_state<void> final : public basic_state<void>
 {
     void set_value()
     {

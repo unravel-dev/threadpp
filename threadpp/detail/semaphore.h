@@ -1,12 +1,12 @@
 #pragma once
 #include "../thread.h"
+#include "parker.h"
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <condition_variable>
 #include <functional>
-#include <list>
 #include <mutex>
+#include <vector>
 
 namespace tpp
 {
@@ -20,17 +20,23 @@ public:
     explicit interrupt_token() = default;
     explicit interrupt_token(bool b);
 
-    auto interrupt() noexcept -> bool;
+    auto interrupt() const noexcept -> bool;
     auto is_interrupted() const noexcept -> bool;
+    auto is_same(const interrupt_token& other) const noexcept -> bool;
 
 private:
     std::shared_ptr<std::atomic<bool>> flag_;
 };
 
+//-----------------------------------------------------------------------------
+/// What condition_variable and mutex block on. A waiting thread runs work as
+/// every tpp wait does (scheduler.h) and works whether or not it is registered.
+//-----------------------------------------------------------------------------
 class semaphore
 {
 public:
     using callback = std::function<void()>;
+    using predicate = std::function<bool()>;
 
     semaphore() noexcept = default;
 
@@ -53,9 +59,16 @@ public:
     void notify_all() noexcept;
 
     //-----------------------------------------------------------------------------
-    /// Waits for the result to become available
+    /// Waits for a notify. before_wait runs once the thread is registered as a
+    /// waiter, after_wait once it is not, also when the wait throws.
     //-----------------------------------------------------------------------------
     void wait(const callback& before_wait = nullptr, const callback& after_wait = nullptr) const;
+
+    //-----------------------------------------------------------------------------
+    /// Waits for a notify or for `is_done` to hold. It is checked once the thread is
+    /// registered as a waiter, so a change notified right before is not missed.
+    //-----------------------------------------------------------------------------
+    void wait_unless(const predicate& is_done) const;
 
     //-----------------------------------------------------------------------------
     /// Blocks until specified timeout_duration has elapsed or
@@ -69,7 +82,9 @@ public:
                   const callback& before_wait = nullptr,
                   const callback& after_wait = nullptr) const -> std::cv_status
     {
-        return wait_for_impl(timeout_duration, before_wait, after_wait);
+        return wait_for_impl(std::chrono::duration_cast<std::chrono::nanoseconds>(timeout_duration),
+                             before_wait,
+                             after_wait);
     }
 
     //-----------------------------------------------------------------------------
@@ -84,23 +99,33 @@ public:
                     const callback& before_wait = nullptr,
                     const callback& after_wait = nullptr) const -> std::cv_status
     {
-        return wait_for(abs_time.time_since_epoch() - Clock::now().time_since_epoch(), before_wait, after_wait);
+        return wait_for(abs_time - Clock::now(), before_wait, after_wait);
     }
 
 protected:
     struct waiter_info
     {
         interrupt_token token;
-        thread::id id;
+        parker_ptr parker;
     };
 
     auto wait_for_impl(const std::chrono::nanoseconds& timeout_duration,
                        const callback& before_wait,
                        const callback& after_wait) const -> std::cv_status;
 
-    auto add_waiter(thread::id id) const -> interrupt_token;
+    auto wait_impl(bool is_timed,
+                   clock::time_point deadline,
+                   const predicate& is_done,
+                   const callback& before_wait,
+                   const callback& after_wait) const -> std::cv_status;
 
-    void remove_waiter(thread::id id) const;
+    auto add_waiter() const -> interrupt_token;
+
+    void remove_waiter(const interrupt_token& token) const;
+
+    // wakes the waiter and the other waits of its thread: a wait nested under
+    // it on the same stack must end first for it to go on
+    void wake(const waiter_info& waiter, std::vector<waiter_info>& woken) const;
 
     mutable std::mutex mutex_;
     mutable std::vector<waiter_info> waiters_;

@@ -24,14 +24,18 @@ public:
     void lock()
     {
         auto id = this_thread::get_id();
-        while(flag_.test_and_set())
+        while(locked_.exchange(true, std::memory_order_acquire))
         {
             // are we already owning it?
             if(owner_ == id)
             {
                 throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
             }
-            sync_.wait();
+            sync_.wait_unless(
+                [this]()
+                {
+                    return !locked_.load(std::memory_order_relaxed);
+                });
         }
 
         owner_ = id;
@@ -43,7 +47,7 @@ public:
     //-----------------------------------------------------------------------------
     auto try_lock() -> bool
     {
-        if(flag_.test_and_set())
+        if(locked_.exchange(true, std::memory_order_acquire))
         {
             return false;
         }
@@ -68,7 +72,7 @@ public:
         }
 
         owner_ = invalid_id();
-        flag_.clear();
+        locked_.store(false, std::memory_order_release);
         sync_.notify_all();
     }
 
@@ -77,6 +81,6 @@ private:
     detail::semaphore sync_;
 
     std::atomic<thread::id> owner_{invalid_id()};
-    std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+    std::atomic<bool> locked_{false};
 };
 } // namespace tpp

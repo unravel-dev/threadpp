@@ -156,6 +156,7 @@ template<size_t I, typename Context, typename Future>
 void when_inner_helper(Context context, Future&& f)
 {
     std::get<I>(context->result) = copy_or_move(std::forward<Future>(f));
+    context->result_state->add_antecedent(std::get<I>(context->result)._internal_get_state());
     auto id = this_thread::get_id();
 
     std::get<I>(context->result)
@@ -239,6 +240,7 @@ auto when_all(InputIt first, InputIt last) -> future<std::vector<typename std::i
     for(; first != last; ++first, ++index)
     {
         shared_context->result.emplace_back(copy_or_move(*first));
+        detail::link_to_source(result_future, shared_context->result[index]._internal_get_state());
         shared_context->result[index].then(id,
                                            [shared_context, index](auto f)
                                            {
@@ -270,12 +272,16 @@ auto when_all(Futures&&... futures) -> future<std::tuple<std::decay_t<Futures>..
         size_t ready_futures = 0;
         result_inner_type result;
         promise<result_inner_type> p;
+        // p's state, which waits on the inputs
+        std::shared_ptr<detail::state_base> result_state;
         std::mutex mutex;
     };
     auto shared_context = std::make_shared<context>();
     shared_context->total_futures = sizeof...(futures);
+    auto result_future = shared_context->p.get_future();
+    shared_context->result_state = result_future._internal_get_state();
     detail::apply_helper<0>(shared_context, std::forward<Futures>(futures)...);
-    return shared_context->p.get_future();
+    return result_future;
 }
 
 template<typename InputIt>
@@ -331,6 +337,7 @@ auto when_any(InputIt first, InputIt last)
     {
         shared_context->result.futures.emplace_back(copy_or_move(*first));
         shared_context->states.emplace_back(shared_context->result.futures[index]._internal_get_state());
+        detail::link_to_source(result_future, shared_context->states.back());
         shared_context->result.futures[index].then(
             id,
             [shared_context, index](auto f)
@@ -399,7 +406,14 @@ auto when_any(Futures&&... futures) -> future<when_any_result<std::tuple<std::de
     shared_context->processed = 0;
     shared_context->total = sz_futures;
 
+    auto result_future = shared_context->p.get_future();
     detail::fill_result_helper<0>(shared_context, std::forward<Futures>(futures)...);
+    utility::apply(
+        [&result_future](const auto&... states)
+        {
+            (detail::link_to_source(result_future, states), ...);
+        },
+        shared_context->states);
     detail::when_any_helper_struct<0, sz_futures>::apply(shared_context, shared_context->result.futures);
     {
         std::lock_guard<std::mutex> lock(shared_context->mutex);
@@ -410,7 +424,7 @@ auto when_any(Futures&&... futures) -> future<when_any_result<std::tuple<std::de
             shared_context->result_moved = true;
         }
     }
-    return shared_context->p.get_future();
+    return result_future;
 }
 
 template<typename Tuple, typename F>
